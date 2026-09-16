@@ -73,6 +73,15 @@ o.bind("SUPER + CTRL + A", "AppSignal", "omarchy-shell memong.appsignal toggle")
 
 `toggle`, `open`, `close` and `refresh` are all available over IPC.
 
+## Remove
+
+```bash
+omarchy plugin remove memong.appsignal
+rm -rf ~/.config/appsignal            # only if you want the token gone too
+```
+
+The plugin writes nothing else: its only state is `~/.local/state/omarchy/appsignal/overview.json`.
+
 ## Settings
 
 Set them on the widget entry in `~/.config/omarchy/shell.json`:
@@ -85,6 +94,13 @@ Set them on the widget entry in `~/.config/omarchy/shell.json`:
 |---|---|---|
 | `refreshIntervalSec` | `120` | Seconds between collector runs (min 30) |
 | `incidentsPerApp` | `5` | Open error rows shown per app |
+
+## Requirements and trust
+
+- **Dependencies:** `curl` and `jq`, both present on a stock Omarchy install. Nothing is compiled, installed or fetched at runtime.
+- **Network:** one HTTPS request to `appsignal.com` per refresh. Your token travels only there, as the query parameter AppSignal's API requires.
+- **Privileges:** runs unsandboxed inside the Omarchy shell as your user, like every plugin. It reads your token file, writes one state file, and opens URLs with `omarchy launch browser`. No `sudo`, no services, no background daemons.
+- **Read only:** the token grants read access to your AppSignal account. The plugin never mutates anything there.
 
 ## How it works
 
