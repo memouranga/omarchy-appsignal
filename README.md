@@ -25,11 +25,12 @@
 
 ## What you get
 
-- **One icon in the bar.** A dot appears on it whenever an uptime monitor is down or an error incident is open. No numbers, no noise.
-- **One panel, every app.** All the organizations and apps your token can see, apps with trouble sorted first.
-- **Open errors.** The latest open exception incidents per app: exception class, action, occurrence count and age. Click one and it opens in AppSignal.
+- **One icon in the bar.** A dot appears on it whenever an uptime monitor is down or an error incident is open (across the apps the panel is showing). No numbers, no noise.
+- **A row of app tabs.** A slidable row of every app your token can see, apps with trouble sorted first and marked with a dot. Only the selected app's details show below it.
+- **Only your favorites, if you have any.** Pin apps in AppSignal and the row shows just those; if nothing is pinned, it shows everything and says so.
+- **Open errors.** The latest open exception incidents for the selected app: exception class, action, occurrence count and age. Click one and it opens in AppSignal.
 - **Uptime monitors.** Each monitor with its up/down state and, when down, since when. Click to open it.
-- **Keyboard first.** `j`/`k` walk the rows, `Enter` opens, `r` refreshes, `g`/`G` jump, `Esc` closes.
+- **Keyboard first.** `j`/`k` walk the rows, `h`/`l` (or `←`/`→`) switch apps, `1`-`9` jump to an app, `Enter` opens, `r` refreshes, `g`/`G` jump, `Esc` closes.
 - **Honest about staleness.** If AppSignal is unreachable the last good data stays on screen, marked `STALE`.
 - **Nothing to build.** Bash, `curl` and `jq` collect; QML paints. Clone it and it runs.
 
@@ -58,7 +59,11 @@ It never goes into `shell.json`.
 |---|---|
 | Left click on the bar icon | Toggle the panel |
 | Right click on the bar icon | Refresh now |
-| `j` / `k` | Next / previous row |
+| Middle click on the bar icon | Select the next app (works even with the panel closed) |
+| `h` / `l` or `←` / `→` (apps row focused) | Previous / next app |
+| `1`-`9` | Jump to app N in the row |
+| Click an app tab, or `Enter` with the apps row focused | Open the app in the browser |
+| `j` / `k` | Switch focus between the apps row and the error/monitor rows, then walk them |
 | `Enter` or left click on an error row | Investigate with your coding agent (or open the browser, see `incidentAction` below) |
 | Right click on an error row, or `o` | Open the incident in the browser |
 | `Enter` or click on a monitor row | Open the monitor in the browser (always) |
@@ -70,6 +75,10 @@ It never goes into `shell.json`.
 The `incidentAction` setting controls what `Enter`/left click do on an **error** row: `"agent"` (the
 default) hands it to your coding agent, `"browser"` opens it on appsignal.com like uptime monitors
 always do. Right click and `o` always mean "open in the browser", whatever the setting.
+
+Only the selected app's errors and monitors are shown. Your selection is remembered across panel
+opens (`~/.local/state/omarchy/appsignal/panel.json`); if the saved app is gone, the first one in
+the row is picked instead.
 
 Bind it to a key in `~/.config/hypr/bindings.lua`:
 
@@ -101,6 +110,14 @@ Set them on the widget entry in `~/.config/omarchy/shell.json`:
 | `refreshIntervalSec` | `120` | Seconds between collector runs (min 30) |
 | `incidentsPerApp` | `5` | Open error rows shown per app |
 | `incidentAction` | `agent` | What `Enter`/left click do on an error row: `agent` or `browser` |
+| `onlyPinned` | `pinned` | `pinned` shows only the apps you pinned in AppSignal (if you've pinned any); `all` always shows every app |
+
+### Pinning apps in AppSignal
+
+The app row shows only your pinned apps by default. To pin one, open it on
+[appsignal.com](https://appsignal.com), find it in the apps list (or its own page), and click the
+pin/star icon next to its name. With nothing pinned, the row falls back to showing every app and the
+panel says so ("Pin apps in AppSignal to show only those here").
 
 ## Investigate with your coding agent
 

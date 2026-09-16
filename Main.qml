@@ -17,6 +17,7 @@ Item {
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || home + "/.local/state"
   readonly property string stateDir: stateHome + "/omarchy/appsignal"
   readonly property string overviewPath: stateDir + "/overview.json"
+  readonly property string prefsPath: stateDir + "/panel.json"
   readonly property string collectorPath: {
     var url = String(Qt.resolvedUrl("bin/appsignal-collect"))
     return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
@@ -26,6 +27,10 @@ Item {
   property int dataRevision: 0
   property int refreshIntervalSec: Math.max(30, Number(setting("refreshIntervalSec", 120)) || 120)
   property int incidentsPerApp: Math.max(1, Number(setting("incidentsPerApp", 5)) || 5)
+  // "pinned" (default) shows only apps pinned in AppSignal, when at least one
+  // exists; "all" always shows every app. No boolean setting type exists in
+  // this Omarchy's manifest schema, so this reads as an enum.
+  readonly property bool onlyPinnedSetting: String(setting("onlyPinned", "pinned") || "pinned") !== "all"
   property double lastRunMs: 0
   property string collectorError: ""
 
@@ -119,8 +124,9 @@ Item {
   readonly property var viewer: { var r = root.dataRevision; return schemaOk && root.overview.viewer ? root.overview.viewer : ({ name: "", email: "" }) }
   readonly property var totals: { var r = root.dataRevision; return schemaOk && root.overview.totals ? root.overview.totals : ({}) }
 
-  // Flat list of apps, each carrying its org so the panel can label it.
-  readonly property var apps: {
+  // Flat list of every app the token can see, each carrying its org so the
+  // panel can label it. Apps with something wrong float to the top.
+  readonly property var allApps: {
     var r = root.dataRevision
     if (!schemaOk) return []
     var orgs = Array.isArray(root.overview.organizations) ? root.overview.organizations : []
@@ -136,6 +142,7 @@ Item {
           name: String(a.name || ""),
           environment: String(a.environment || ""),
           status: String(a.status || ""),
+          pinned: a.pinned === true,
           orgName: String(org.name || ""),
           orgSlug: String(org.slug || ""),
           lastPushProcessedAt: String(a.lastPushProcessedAt || ""),
@@ -154,9 +161,25 @@ Item {
         })
       }
     }
-    // Apps with something wrong float to the top.
     out.sort(function(x, y) { return root.attention(y) - root.attention(x) })
     return out
+  }
+
+  readonly property bool anyPinned: {
+    var list = root.allApps
+    for (var i = 0; i < list.length; i++) if (list[i].pinned) return true
+    return false
+  }
+
+  // True when the "only pinned" setting is on but nothing is pinned yet: the
+  // panel falls back to showing everything and says so.
+  readonly property bool pinnedFallback: root.onlyPinnedSetting && !root.anyPinned
+
+  // The apps the panel actually shows: pinned-only when that setting is on
+  // and at least one app is pinned, otherwise every app.
+  readonly property var apps: {
+    if (!root.onlyPinnedSetting || !root.anyPinned) return root.allApps
+    return root.allApps.filter(function(a) { return a.pinned === true })
   }
 
   function attention(app) {
@@ -164,10 +187,82 @@ Item {
     return Number(t.monitorsDown || 0) * 100 + Number(t.checkInsFailing || 0) * 50 + Number(t.errors || 0) * 2 + Number(t.perf || 0)
   }
 
-  readonly property int openErrors: Number(totals.errors || 0)
-  readonly property int openPerf: Number(totals.perf || 0)
-  readonly property int monitorsDown: Number(totals.monitorsDown || 0)
-  readonly property int checkInsFailing: Number(totals.checkInsFailing || 0)
+  // Totals over the visible apps only, so a pinned-down view doesn't have the
+  // bar dot or tooltip alarm about apps the panel isn't even showing.
+  readonly property var visibleTotals: {
+    var list = root.apps
+    var out = { errors: 0, perf: 0, monitors: 0, monitorsDown: 0, checkIns: 0, checkInsFailing: 0 }
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i].totals || {}
+      out.errors += Number(t.errors || 0)
+      out.perf += Number(t.perf || 0)
+      out.monitors += Number(t.monitors || 0)
+      out.monitorsDown += Number(t.monitorsDown || 0)
+      out.checkIns += Number(t.checkIns || 0)
+      out.checkInsFailing += Number(t.checkInsFailing || 0)
+    }
+    return out
+  }
+
+  readonly property int openErrors: Number(visibleTotals.errors || 0)
+  readonly property int openPerf: Number(visibleTotals.perf || 0)
+  readonly property int monitorsDown: Number(visibleTotals.monitorsDown || 0)
+  readonly property int checkInsFailing: Number(visibleTotals.checkInsFailing || 0)
   readonly property bool urgent: monitorsDown > 0 || checkInsFailing > 0
   readonly property bool attentionNeeded: urgent || openErrors > 0
+
+  // ------------------------------------------------------- app selection
+
+  property string selectedAppId: ""
+
+  readonly property int selectedAppIndex: {
+    var list = root.apps
+    for (var i = 0; i < list.length; i++) if (list[i].id === root.selectedAppId) return i
+    return 0
+  }
+
+  // The selected app, or the first visible one if the persisted id no longer
+  // exists (removed, unpinned, or never set), or null when nothing is visible.
+  readonly property var selectedApp: {
+    var list = root.apps
+    if (list.length === 0) return null
+    for (var i = 0; i < list.length; i++) if (list[i].id === root.selectedAppId) return list[i]
+    return list[0]
+  }
+
+  function selectApp(id) {
+    if (!id || id === root.selectedAppId) return
+    root.selectedAppId = String(id)
+    root.savePrefs()
+  }
+
+  function stepApp(delta) {
+    var list = root.apps
+    if (list.length === 0) return
+    var next = ((root.selectedAppIndex + delta) % list.length + list.length) % list.length
+    root.selectApp(list[next].id)
+  }
+
+  function savePrefs() {
+    prefsFile.setText(JSON.stringify({ selectedAppId: root.selectedAppId }, null, 2) + "\n")
+  }
+
+  function loadPrefs(content) {
+    try {
+      var parsed = JSON.parse(String(content || "{}"))
+      root.selectedAppId = parsed && typeof parsed === "object" ? String(parsed.selectedAppId || "") : ""
+    } catch (e) {
+      root.selectedAppId = ""
+    }
+  }
+
+  FileView {
+    id: prefsFile
+    path: root.prefsPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.loadPrefs(text())
+    onLoadFailed: root.selectedAppId = ""
+  }
 }

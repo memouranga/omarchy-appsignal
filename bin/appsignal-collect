@@ -99,6 +99,7 @@ query OmarchyOverview($limit: Int!) {
         name
         environment
         status
+        viewerPinned
         lastPushProcessedAt
         exceptionIncidents(state: OPEN, limit: $limit, order: LAST) {
           number
@@ -236,6 +237,7 @@ jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
                   name: .name,
                   environment: (.environment // ""),
                   status: (.status // ""),
+                  pinned: (.viewerPinned == true),
                   lastPushProcessedAt: (.lastPushProcessedAt // ""),
                   url: $base,
                   errorsUrl: "\($base)/exceptions",

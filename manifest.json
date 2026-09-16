@@ -29,7 +29,8 @@
     "defaults": {
       "refreshIntervalSec": 120,
       "incidentsPerApp": 5,
-      "incidentAction": "agent"
+      "incidentAction": "agent",
+      "onlyPinned": "pinned"
     },
     "schema": [
       {
@@ -57,6 +58,14 @@
         "options": ["agent", "browser"],
         "defaultValue": "agent",
         "description": "\"agent\" runs `omarchy agent prompt` to investigate the incident; \"browser\" opens it on appsignal.com instead. Right-click or `o` always opens the browser."
+      },
+      {
+        "key": "onlyPinned",
+        "type": "enum",
+        "label": "Show only apps pinned in AppSignal",
+        "options": ["pinned", "all"],
+        "defaultValue": "pinned",
+        "description": "\"pinned\" shows only the apps you pinned in AppSignal, as long as you've pinned at least one; \"all\" always shows every app. No boolean setting type exists in this Omarchy's schema, hence the enum."
       }
     ]
   }

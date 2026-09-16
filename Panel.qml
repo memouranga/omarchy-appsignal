@@ -5,11 +5,12 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// AppSignal dashboard. One bar icon with an alert dot; the panel lists every
-// app the token can see (apps with something wrong first), each with its
-// open exception incidents and uptime monitors. All rows across all apps
-// flatten into a single j/k cursor — there are no tabs or host zones to
-// juggle like dev.git has.
+// AppSignal dashboard. One bar icon with an alert dot; the panel opens on a
+// horizontally-scrolling row of app tabs (apps with something wrong first,
+// pinned-only when the user has pinned any) and shows only the selected
+// app's open exception incidents and uptime monitors below it. Two focus
+// zones, "apps" and "rows", the same up/down-to-switch, left/right-to-move-
+// within pattern as dev.git.
 Panel {
   id: root
   moduleName: "memong.appsignal"
@@ -36,6 +37,13 @@ Panel {
 
   readonly property var apps: root.asList(data.apps)
 
+  // Mirrored onto the root: inside a Button delegate `data` resolves to the
+  // item's own default property, not this file's Main instance (same reason
+  // dev.git mirrors pinnedKind).
+  readonly property var selectedApp: data.selectedApp
+  readonly property int selectedAppIndex: data.selectedAppIndex
+  readonly property bool pinnedFallback: data.pinnedFallback
+
   // A JS array that crosses a QML `var` property boundary arrives as a
   // QVariantList wrapper: indexable and with a length, but Array.isArray()
   // says false. Everything that walks a list from Main goes through here.
@@ -48,35 +56,143 @@ Panel {
     return out
   }
 
-  function appRowCount(app) {
-    return root.asList(app ? app.errors : null).length
-         + root.asList(app ? app.monitors : null).length
-  }
-
-  function appOffset(appIndex) {
-    var offset = 0
-    for (var i = 0; i < appIndex && i < root.apps.length; i++) offset += root.appRowCount(root.apps[i])
-    return offset
-  }
-
-  // Every error row followed by every monitor row, app by app, in the same
-  // order the apps render in. This is the one list j/k walks.
+  // Only the selected app's rows are ever on screen, so this is the one list
+  // j/k walks: every error row followed by every monitor row of that app.
   readonly property var focusRows: {
     var rows = []
-    for (var i = 0; i < root.apps.length; i++) {
-      var app = root.apps[i]
-      var errs = root.asList(app.errors)
-      for (var j = 0; j < errs.length; j++)
-        rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
-      var mons = root.asList(app.monitors)
-      for (var k = 0; k < mons.length; k++)
-        rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
-    }
+    var app = root.selectedApp
+    if (!app) return rows
+    var errs = root.asList(app.errors)
+    for (var j = 0; j < errs.length; j++)
+      rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
+    var mons = root.asList(app.monitors)
+    for (var k = 0; k < mons.length; k++)
+      rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
     return rows
   }
 
   property bool cursorActive: false
   property int selectedRowIndex: 0
+
+  // ---------------------------------------------------------------- app tabs
+
+  function envAbbrev(env) {
+    var e = String(env || "").toLowerCase()
+    if (e === "production") return "prod"
+    if (e === "development") return "dev"
+    if (e === "staging") return "stg"
+    return String(env || "")
+  }
+
+  function appTabLabel(app) {
+    var env = root.envAbbrev(app ? app.environment : "")
+    var name = app ? String(app.name || "") : ""
+    return env !== "" ? name + " · " + env : name
+  }
+
+  function appHasAlert(app) {
+    var t = app ? app.totals || {} : {}
+    return Number(t.errors || 0) > 0 || Number(t.monitorsDown || 0) > 0
+  }
+
+  // Delegates inside the Repeater below sit in their own implicit Component,
+  // where the bare identifier `data` resolves to the delegate item's own
+  // default `data` property (every Item has one), not this file's Main
+  // instance — so app-tab delegates call this wrapper instead of `data.
+  // selectApp` directly.
+  function selectApp(id) { data.selectApp(id) }
+
+  function jumpApp(index) {
+    var list = root.apps
+    if (index < 0 || index >= list.length) return
+    root.selectApp(list[index].id)
+  }
+
+  // App button delegates register themselves so the selection can be
+  // scrolled into view without guessing at layout geometry.
+  property var appButtonItems: ({})
+  function registerAppButton(index, item) { root.appButtonItems[index] = item }
+  function unregisterAppButton(index, item) { if (root.appButtonItems[index] === item) delete root.appButtonItems[index] }
+
+  function scrollToSelectedApp() {
+    if (!appsFlick) return
+    var item = root.appButtonItems[root.selectedAppIndex]
+    if (!item) return
+    var pos = item.mapToItem(appsFlick.contentItem, 0, 0)
+    var pad = Style.space(8)
+    if (pos.x - pad < appsFlick.contentX)
+      appsFlick.contentX = Math.max(0, pos.x - pad)
+    else if (pos.x + item.width + pad > appsFlick.contentX + appsFlick.width)
+      appsFlick.contentX = pos.x + item.width + pad - appsFlick.width
+  }
+
+  // Identity of the currently selected app (not just its index, which can
+  // coincidentally stay put across a refresh that reorders the list): the
+  // row cursor and scroll position only reset when the app itself changes.
+  readonly property string selectedAppKey: root.selectedApp ? String(root.selectedApp.id) : ""
+  onSelectedAppKeyChanged: {
+    root.selectedRowIndex = 0
+    if (panelFlick) panelFlick.contentY = 0
+    root.scrollToSelectedApp()
+  }
+
+  // ---------------------------------------------------------------- focus zones
+
+  // Vertical focus zones, top to bottom: the app tabs, then the row list.
+  // Up/Down (k/j) walks between them and Left/Right (h/l) moves inside
+  // whichever zone holds the cursor, same pattern as dev.git.
+  property string focusZone: "rows"
+
+  readonly property bool appsZoneAvailable: root.apps.length > 1
+
+  function zoneOrder() {
+    var zones = []
+    if (root.appsZoneAvailable) zones.push("apps")
+    if (root.focusRows.length > 0) zones.push("rows")
+    return zones
+  }
+
+  function enterZone(zone) {
+    root.focusZone = zone
+    root.cursorActive = zone === "rows"
+    if (zone === "rows") root.scrollToSelected()
+    else root.scrollToSelectedApp()
+  }
+
+  function moveZone(dy) {
+    var zones = root.zoneOrder()
+    if (zones.length === 0) return
+    var at = zones.indexOf(root.focusZone)
+    if (at < 0) at = 0
+
+    if (root.focusZone === "rows" && zones[at] === "rows") {
+      // Inside the rows the cursor scrolls first and only leaves the zone
+      // when it is already parked on the top row.
+      if (dy > 0 || (root.cursorActive && root.selectedRowIndex > 0)) {
+        root.moveRows(dy)
+        return
+      }
+    }
+
+    var next = root.clamp(at + dy, 0, zones.length - 1)
+    if (zones[next] === root.focusZone) {
+      if (root.focusZone === "rows") root.moveRows(dy)
+      return
+    }
+    root.enterZone(zones[next])
+  }
+
+  function moveWithinZone(dx) {
+    if (root.focusZone === "apps") data.stepApp(dx)
+  }
+
+  function activateZone() {
+    if (root.focusZone === "rows") root.activateRow()
+    else if (root.focusZone === "apps") root.openUrl(root.selectedApp ? root.selectedApp.url : "")
+  }
+
+  onFocusZoneChanged: root.cursorActive = root.focusZone === "rows"
+  onAppsZoneAvailableChanged: if (!root.appsZoneAvailable && root.focusZone === "apps") root.enterZone("rows")
 
   // Row delegates register themselves so the cursor can scroll to a row
   // that is currently off-screen without guessing at layout geometry.
@@ -96,6 +212,7 @@ Panel {
   function jumpRows(index) {
     var n = root.focusRows.length
     if (n === 0) return
+    root.focusZone = "rows"
     root.cursorActive = true
     root.selectedRowIndex = root.clamp(index, 0, n - 1)
     root.scrollToSelected()
@@ -240,12 +357,14 @@ Panel {
   // ---------------------------------------------------------------- lifecycle
 
   onOpenedChanged: if (opened) {
-    cursorActive = false
+    focusZone = root.appsZoneAvailable ? "apps" : "rows"
+    cursorActive = focusZone === "rows"
     selectedRowIndex = 0
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
+    if (appsFlick) appsFlick.contentX = 0
     data.refreshOnOpen()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    Qt.callLater(function() { keyCatcher.forceActiveFocus(); root.scrollToSelectedApp() })
   }
 
   Main {
@@ -290,6 +409,7 @@ Panel {
     }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.refreshNow()
+      else if (buttonCode === Qt.MiddleButton) data.stepApp(1)
       else root.toggle()
     }
   }
@@ -323,14 +443,18 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
 
-      onMoveRequested: function(dx, dy) { if (dy !== 0) root.moveRows(dy) }
-      onActivateRequested: root.activateRow()
+      onMoveRequested: function(dx, dy) {
+        if (dx !== 0) root.moveWithinZone(dx)
+        if (dy !== 0) root.moveZone(dy)
+      }
+      onActivateRequested: root.activateZone()
       onCloseRequested: root.close()
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.refreshNow()
         else if (t === "g") root.jumpRows(0)
         else if (t === "G") root.jumpRows(root.focusRows.length - 1)
         else if (t === "o" || t === "O") root.activateSelected(true)
+        else if (t >= "1" && t <= "9") root.jumpApp(t.charCodeAt(0) - 49)
       }
 
       Flickable {
@@ -459,6 +583,17 @@ Panel {
             }
           }
 
+          // ---------- Pinned-apps fallback notice ----------
+          Text {
+            visible: data.ready && root.apps.length > 0 && root.pinnedFallback
+            width: parent.width
+            text: "Pin apps in AppSignal to show only those here"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           // ---------- No apps ----------
           Text {
             visible: data.ready && root.apps.length === 0
@@ -472,136 +607,193 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // ---------- Apps ----------
-          Repeater {
-            model: root.apps
+          // ---------- App tabs ----------
+          Flickable {
+            id: appsFlick
+            visible: root.apps.length > 1
+            width: parent.width
+            height: appsRow.implicitHeight
+            contentWidth: appsRow.implicitWidth
+            contentHeight: height
+            clip: true
+            flickableDirection: Flickable.HorizontalFlick
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentWidth > width
 
-            Column {
-              id: appSection
-              required property var modelData
-              required property int index
-
-              readonly property var app: modelData
-              readonly property int offset: root.appOffset(index)
-              readonly property var errs: root.asList(app.errors)
-              readonly property var mons: root.asList(app.monitors)
-
-              width: column.width
-              spacing: Style.space(8)
-
-              PanelSeparator { foreground: root.foreground }
-
-              // App header: name + environment, click opens the app.
-              Item {
-                width: parent.width
-                implicitHeight: appHeaderRow.implicitHeight
-
-                Row {
-                  id: appHeaderRow
-                  anchors.left: parent.left
-                  anchors.right: appSummaryText.visible ? appSummaryText.left : parent.right
-                  anchors.rightMargin: appSummaryText.visible ? Style.space(8) : 0
-                  spacing: Style.space(6)
-
-                  Text {
-                    text: appSection.app.name
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    elide: Text.ElideRight
-                  }
-
-                  Text {
-                    visible: appSection.app.environment !== ""
-                    text: appSection.app.environment
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-
-                Text {
-                  id: appSummaryText
-                  anchors.right: parent.right
-                  anchors.verticalCenter: appHeaderRow.verticalCenter
-                  text: root.appSummary(appSection.app)
-                  visible: text !== ""
-                  color: appSection.errs.length > 0 || appSection.mons.length > 0
-                    ? root.urgent
-                    : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                }
-
-                MouseArea {
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.openUrl(appSection.app.url)
-                }
+            WheelHandler {
+              onWheel: function(event) {
+                var delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x
+                appsFlick.contentX = root.clamp(appsFlick.contentX - delta, 0,
+                  Math.max(0, appsFlick.contentWidth - appsFlick.width))
               }
+            }
 
-              // ---- Open errors ----
-              Column {
-                width: parent.width
-                spacing: Style.space(6)
+            Row {
+              id: appsRow
+              spacing: Style.spacing.md
 
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "OPEN ERRORS"
+              Repeater {
+                model: root.apps
+
+                Button {
+                  id: appButton
+                  required property var modelData
+                  required property int index
+
+                  text: root.appTabLabel(modelData)
+                  selected: index === root.selectedAppIndex
+                  hasCursor: root.focusZone === "apps" && index === root.selectedAppIndex
+                  bordered: true
                   foreground: root.foreground
                   fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  verticalPadding: Style.spacing.controlPaddingY
+                  onClicked: { root.focusZone = "apps"; root.selectApp(modelData.id) }
+                  onHovered: function(isHovered) { if (isHovered) root.focusZone = "apps" }
+
+                  Component.onCompleted: root.registerAppButton(appButton.index, appButton)
+                  Component.onDestruction: root.unregisterAppButton(appButton.index, appButton)
+
+                  // Alert dot: this app has open errors or a monitor down.
+                  Rectangle {
+                    visible: root.appHasAlert(appButton.modelData)
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.rightMargin: Style.space(3)
+                    anchors.topMargin: Style.space(3)
+                    width: Style.space(5)
+                    height: width
+                    radius: width / 2
+                    color: root.urgent
+                  }
+                }
+              }
+            }
+          }
+
+          // ---------- Selected app ----------
+          Column {
+            id: appSection
+            visible: !!root.selectedApp
+            width: column.width
+            spacing: Style.space(8)
+
+            readonly property var app: root.selectedApp || ({})
+            readonly property var errs: root.asList(appSection.app.errors)
+            readonly property var mons: root.asList(appSection.app.monitors)
+
+            PanelSeparator { foreground: root.foreground }
+
+            // App header: name + environment, click opens the app.
+            Item {
+              width: parent.width
+              implicitHeight: appHeaderRow.implicitHeight
+
+              Row {
+                id: appHeaderRow
+                anchors.left: parent.left
+                anchors.right: appSummaryText.visible ? appSummaryText.left : parent.right
+                anchors.rightMargin: appSummaryText.visible ? Style.space(8) : 0
+                spacing: Style.space(6)
+
+                Text {
+                  text: appSection.app.name || ""
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                  elide: Text.ElideRight
                 }
 
                 Text {
-                  visible: appSection.errs.length === 0
-                  width: parent.width
-                  text: "No open errors"
+                  visible: (appSection.app.environment || "") !== ""
+                  text: appSection.app.environment || ""
                   color: root.dim
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                Repeater {
-                  model: appSection.errs
-
-                  ErrorRow {
-                    required property var modelData
-                    required property int index
-
-                    width: appSection.width
-                    err: modelData
-                    flatIndex: appSection.offset + index
-                  }
+                  font.pixelSize: Style.font.caption
                 }
               }
 
-              // ---- Uptime ----
-              Column {
+              Text {
+                id: appSummaryText
+                anchors.right: parent.right
+                anchors.verticalCenter: appHeaderRow.verticalCenter
+                text: root.appSummary(appSection.app)
+                visible: text !== ""
+                color: appSection.errs.length > 0 || appSection.mons.length > 0
+                  ? root.urgent
+                  : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.openUrl(appSection.app.url)
+              }
+            }
+
+            // ---- Open errors ----
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+
+              PanelSectionHeader {
                 width: parent.width
-                visible: appSection.mons.length > 0
-                spacing: Style.space(6)
+                text: "OPEN ERRORS"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
 
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "UPTIME"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
+              Text {
+                visible: appSection.errs.length === 0
+                width: parent.width
+                text: "No open errors"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Repeater {
+                model: appSection.errs
+
+                ErrorRow {
+                  required property var modelData
+                  required property int index
+
+                  width: appSection.width
+                  err: modelData
+                  flatIndex: index
                 }
+              }
+            }
 
-                Repeater {
-                  model: appSection.mons
+            // ---- Uptime ----
+            Column {
+              width: parent.width
+              visible: appSection.mons.length > 0
+              spacing: Style.space(6)
 
-                  MonitorRow {
-                    required property var modelData
-                    required property int index
+              PanelSectionHeader {
+                width: parent.width
+                text: "UPTIME"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
 
-                    width: appSection.width
-                    mon: modelData
-                    flatIndex: appSection.offset + appSection.errs.length + index
-                  }
+              Repeater {
+                model: appSection.mons
+
+                MonitorRow {
+                  required property var modelData
+                  required property int index
+
+                  width: appSection.width
+                  mon: modelData
+                  flatIndex: appSection.errs.length + index
                 }
               }
             }
@@ -716,6 +908,7 @@ Panel {
         root.activateItem(root.focusRows[errorRow.flatIndex], mouse.button === Qt.RightButton)
       }
       onEntered: {
+        root.focusZone = "rows"
         root.cursorActive = true
         root.selectedRowIndex = errorRow.flatIndex
       }
@@ -823,6 +1016,7 @@ Panel {
       cursorShape: Qt.PointingHandCursor
       onClicked: root.openUrl(monitorRow.panelUrl)
       onEntered: {
+        root.focusZone = "rows"
         root.cursorActive = true
         root.selectedRowIndex = monitorRow.flatIndex
       }
