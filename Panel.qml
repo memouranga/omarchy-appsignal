@@ -17,7 +17,12 @@ Panel {
   manageIpc: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  // Panel content uses the palette's urgent role; the bar dot uses the bar's
+  // own "calling attention" color. Both are theme-supplied — a theme whose
+  // colors.toml paints red green (this one does) gets a green alert, and
+  // that is the theme's call, not ours.
+  readonly property color urgent: Color.urgent
+  readonly property color barUrgent: bar ? bar.urgent : Color.urgent
   readonly property color accent: Color.accent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -29,12 +34,23 @@ Panel {
 
   // ---------------------------------------------------------------- rows
 
-  readonly property var apps: data.apps
+  readonly property var apps: root.asList(data.apps)
+
+  // A JS array that crosses a QML `var` property boundary arrives as a
+  // QVariantList wrapper: indexable and with a length, but Array.isArray()
+  // says false. Everything that walks a list from Main goes through here.
+  function asList(v) {
+    if (!v || typeof v !== "object") return []
+    var n = Number(v.length)
+    if (!isFinite(n) || n <= 0) return []
+    var out = []
+    for (var i = 0; i < n; i++) out.push(v[i])
+    return out
+  }
 
   function appRowCount(app) {
-    var errs = app && Array.isArray(app.errors) ? app.errors.length : 0
-    var mons = app && Array.isArray(app.monitors) ? app.monitors.length : 0
-    return errs + mons
+    return root.asList(app ? app.errors : null).length
+         + root.asList(app ? app.monitors : null).length
   }
 
   function appOffset(appIndex) {
@@ -49,10 +65,10 @@ Panel {
     var rows = []
     for (var i = 0; i < root.apps.length; i++) {
       var app = root.apps[i]
-      var errs = Array.isArray(app.errors) ? app.errors : []
+      var errs = root.asList(app.errors)
       for (var j = 0; j < errs.length; j++)
         rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
-      var mons = Array.isArray(app.monitors) ? app.monitors : []
+      var mons = root.asList(app.monitors)
       for (var k = 0; k < mons.length; k++)
         rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
     }
@@ -228,7 +244,10 @@ Panel {
     }
   }
 
+  // Alert dot over the icon: drawn as a sibling above the button so the
+  // button's own hover/press chrome never paints over it.
   Rectangle {
+    z: button.z + 1
     visible: data.attentionNeeded
     anchors.right: button.right
     anchors.top: button.top
@@ -237,7 +256,7 @@ Panel {
     width: Style.space(5)
     height: width
     radius: width / 2
-    color: root.urgent
+    color: root.barUrgent
   }
 
   KeyboardPanel {
@@ -413,8 +432,8 @@ Panel {
 
               readonly property var app: modelData
               readonly property int offset: root.appOffset(index)
-              readonly property var errs: Array.isArray(app.errors) ? app.errors : []
-              readonly property var mons: Array.isArray(app.monitors) ? app.monitors : []
+              readonly property var errs: root.asList(app.errors)
+              readonly property var mons: root.asList(app.monitors)
 
               width: column.width
               spacing: Style.space(8)
@@ -457,7 +476,9 @@ Panel {
                   anchors.verticalCenter: appHeaderRow.verticalCenter
                   text: root.appSummary(appSection.app)
                   visible: text !== ""
-                  color: root.urgent
+                  color: appSection.errs.length > 0 || appSection.mons.length > 0
+                    ? root.urgent
+                    : root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -552,6 +573,13 @@ Panel {
     readonly property string title: err ? String(err.title || "") : ""
     readonly property string action: err ? String(err.action || "") : ""
     readonly property int count: err ? Number(err.count || 0) : 0
+    // Some incidents carry no action name; don't leave a dangling separator.
+    readonly property string meta: {
+      var parts = []
+      if (errorRow.action !== "") parts.push(errorRow.action)
+      if (errorRow.count > 0) parts.push(errorRow.count + "×")
+      return parts.join("  ·  ")
+    }
     readonly property string url: err ? String(err.url || "") : ""
     readonly property string lastOccurredAt: err ? String(err.lastOccurredAt || "") : ""
 
@@ -606,7 +634,8 @@ Panel {
         Text {
           id: rowMeta
           width: parent.width - rowGlyph.width - parent.spacing
-          text: errorRow.action + "  ·  " + errorRow.count + "×"
+          text: errorRow.meta
+          visible: text !== ""
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
