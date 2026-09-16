@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# Collect an AppSignal overview (apps, open incidents, uptime monitors,
+# check-ins, last deploy) into one JSON file for the memong.appsignal
+# Omarchy bar plugin.
+#
+# Requirements: curl and jq. Auth is a personal API token, read from (first hit wins):
+#   1. $APPSIGNAL_API_TOKEN
+#   2. the file named by $APPSIGNAL_TOKEN_FILE
+#   3. ~/.config/appsignal/api_token   (chmod 600; one line)
+# Create one at https://appsignal.com/users/edit ("Personal API key").
+
+set -uo pipefail
+
+readonly SCHEMA_VERSION=1
+readonly ENDPOINT="https://appsignal.com/graphql"
+
+output=""
+limit=5
+timeout=30
+
+usage() {
+  cat <<'USAGE'
+Usage: appsignal-collect [options]
+  -output PATH     Write the overview JSON here (default: stdout)
+  -limit N         Incident rows per app (default: 5)
+  -timeout SECS    Request deadline (default: 30)
+USAGE
+}
+
+while (($#)); do
+  case "$1" in
+    -output|--output) output=$2; shift 2 ;;
+    -limit|--limit) limit=$2; shift 2 ;;
+    -timeout|--timeout) timeout=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "appsignal-collect: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+[[ $limit =~ ^[0-9]+$ ]] || limit=5
+[[ $timeout =~ ^[0-9]+$ ]] || timeout=30
+
+for tool in curl jq; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "appsignal-collect: $tool is required" >&2; exit 1; }
+done
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# --------------------------------------------------------------- token
+
+config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+token_file=${APPSIGNAL_TOKEN_FILE:-$config_home/appsignal/api_token}
+token=${APPSIGNAL_API_TOKEN:-}
+if [[ -z $token && -r $token_file ]]; then
+  token=$(head -n1 "$token_file" | tr -d '[:space:]')
+fi
+
+auth_help="No AppSignal token. Create a personal API key at https://appsignal.com/users/edit and save it to $token_file (chmod 600)."
+
+# Emit a "not ready" overview and stop. Keeps any previous data out on purpose:
+# a missing token is a configuration state, not a transient failure.
+emit_not_ready() {
+  local msg=$1
+  jq -n --arg msg "$msg" --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" \
+    '{schemaVersion:$v, ready:false, stale:false, authHelpText:$msg, error:"", updatedAt:$now,
+      viewer:{name:"",email:""}, organizations:[], totals:{}}' | write_out
+}
+
+write_out() {
+  if [[ -n $output ]]; then
+    mkdir -p "$(dirname "$output")"
+    local tmp
+    tmp=$(mktemp "$(dirname "$output")/.overview.XXXXXX") || exit 1
+    cat > "$tmp" && mv -f "$tmp" "$output"
+  else
+    cat
+  fi
+}
+
+if [[ -z $token ]]; then
+  emit_not_ready "$auth_help"
+  exit 0
+fi
+
+# --------------------------------------------------------------- query
+
+# One request: every org, every app, and per app the open incident heads,
+# uptime monitors with their alerts, check-in triggers and the last deploy.
+read -r -d '' QUERY <<'GQL' || true
+query OmarchyOverview($limit: Int!) {
+  viewer {
+    name
+    email
+    organizations {
+      id
+      name
+      slug
+      apps {
+        id
+        name
+        environment
+        status
+        lastPushProcessedAt
+        exceptionIncidents(state: OPEN, limit: $limit, order: LAST) {
+          number
+          exceptionName
+          exceptionMessage
+          actionNames
+          namespace
+          count
+          severity
+          state
+          lastOccurredAt
+        }
+        performanceIncidents(state: OPEN, limit: $limit, order: LAST) {
+          number
+          actionNames
+          namespace
+          mean
+          count
+          severity
+          state
+          lastOccurredAt
+        }
+        uptimeMonitors {
+          id
+          name
+          url
+          regions
+          alerts {
+            id
+            state
+            openedAt
+            lastValue
+            message
+          }
+        }
+        checkIns {
+          triggers {
+            id
+            identifier
+            kind
+            lastState
+            lastErrorAt
+            lastSuccessAt
+            lastUpdateAt
+          }
+        }
+        deployMarkers(limit: 1) {
+          id
+          createdAt
+          shortRevision
+          user
+          liveForInWords
+          exceptionCount
+          exceptionRate
+        }
+      }
+    }
+  }
+}
+GQL
+
+body=$(jq -n --arg q "$QUERY" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}')
+
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+
+http=$(curl -sS --max-time "$timeout" \
+  -H "Content-Type: application/json" \
+  -X POST "$ENDPOINT?token=$token" \
+  -d "$body" -o "$tmp/resp.json" -w '%{http_code}' 2>"$tmp/curl.err") || http=000
+
+# ------------------------------------------------------- failure handling
+
+# On a transient failure keep the previous overview (marked stale) so the panel
+# does not blank out because of one bad request.
+emit_stale() {
+  local msg=$1
+  if [[ -n $output && -s $output ]] && jq -e '.ready == true' "$output" >/dev/null 2>&1; then
+    jq --arg msg "$msg" '.stale = true | .error = $msg' "$output" | write_out
+  else
+    jq -n --arg msg "$msg" --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" \
+      '{schemaVersion:$v, ready:false, stale:false, authHelpText:"", error:$msg, updatedAt:$now,
+        viewer:{name:"",email:""}, organizations:[], totals:{}}' | write_out
+  fi
+}
+
+if [[ $http == 000 ]]; then
+  emit_stale "AppSignal unreachable: $(head -c 200 "$tmp/curl.err")"
+  exit 0
+fi
+if [[ $http == 401 || $http == 403 ]]; then
+  emit_not_ready "AppSignal rejected the token (HTTP $http). Check $token_file or \$APPSIGNAL_API_TOKEN."
+  exit 0
+fi
+if [[ $http != 200 ]]; then
+  emit_stale "AppSignal returned HTTP $http."
+  exit 0
+fi
+if ! jq -e . "$tmp/resp.json" >/dev/null 2>&1; then
+  emit_stale "AppSignal returned a non-JSON body."
+  exit 0
+fi
+if jq -e '.errors and (.errors | length > 0)' "$tmp/resp.json" >/dev/null 2>&1; then
+  emit_stale "GraphQL: $(jq -r '[.errors[].message] | join("; ")' "$tmp/resp.json" | head -c 300)"
+  exit 0
+fi
+
+# ------------------------------------------------------------ transform
+
+jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
+  def site_url($org; $app): "https://appsignal.com/\($org)/sites/\($app)";
+  def open_alerts: [ (.alerts // [])[] | select(.state == "OPEN" or .state == "WARMUP") ];
+  def sev: (.severity // "") | ascii_downcase;
+
+  .data.viewer as $viewer
+  | {
+      schemaVersion: $v,
+      ready: true,
+      stale: false,
+      authHelpText: "",
+      error: "",
+      updatedAt: $now,
+      viewer: { name: ($viewer.name // ""), email: ($viewer.email // "") },
+      organizations: [
+        ($viewer.organizations // [])[]
+        | . as $org
+        | {
+            id: .id, name: .name, slug: .slug,
+            apps: [
+              (.apps // [])[]
+              | . as $app
+              | (site_url($org.slug; $app.id)) as $base
+              | {
+                  id: .id,
+                  name: .name,
+                  environment: (.environment // ""),
+                  status: (.status // ""),
+                  lastPushProcessedAt: (.lastPushProcessedAt // ""),
+                  url: $base,
+                  errorsUrl: "\($base)/exceptions",
+                  perfUrl: "\($base)/performance",
+                  uptimeUrl: "\($base)/uptime-monitoring",
+                  checkInsUrl: "\($base)/check-ins",
+                  deploysUrl: "\($base)/deploys",
+                  errors: [
+                    (.exceptionIncidents // [])[]
+                    | {
+                        number, kind: "error",
+                        title: (.exceptionName // "Error"),
+                        message: (.exceptionMessage // ""),
+                        action: ((.actionNames // []) | join(", ")),
+                        namespace: (.namespace // ""),
+                        count: (.count // 0),
+                        severity: sev,
+                        lastOccurredAt: (.lastOccurredAt // ""),
+                        url: "\($base)/exceptions/incidents/\(.number)"
+                      }
+                  ],
+                  perf: [
+                    (.performanceIncidents // [])[]
+                    | {
+                        number, kind: "perf",
+                        title: ((.actionNames // []) | join(", ")),
+                        message: "",
+                        action: ((.actionNames // []) | join(", ")),
+                        namespace: (.namespace // ""),
+                        count: (.count // 0),
+                        mean: (.mean // 0),
+                        severity: sev,
+                        lastOccurredAt: (.lastOccurredAt // ""),
+                        url: "\($base)/performance/incidents/\(.number)"
+                      }
+                  ],
+                  monitors: [
+                    (.uptimeMonitors // [])[]
+                    | (open_alerts) as $open
+                    | {
+                        id, name, url,
+                        regions: (.regions // []),
+                        down: (($open | length) > 0),
+                        openAlerts: ($open | length),
+                        openedAt: (($open | map(.openedAt // "") | sort | first) // ""),
+                        message: (($open | map(.message // "") | map(select(. != "")) | first) // ""),
+                        panelUrl: "\($base)/uptime-monitoring/\(.id)"
+                      }
+                  ],
+                  checkIns: [
+                    ((.checkIns // {}).triggers // [])[]
+                    | {
+                        id, identifier,
+                        kind: (.kind // ""),
+                        lastState: (.lastState // ""),
+                        failing: ((.lastState // "") | IN("MISSED","LATE","UNEXPECTED")),
+                        lastErrorAt: (.lastErrorAt // ""),
+                        lastSuccessAt: (.lastSuccessAt // ""),
+                        lastUpdateAt: (.lastUpdateAt // ""),
+                        url: "\($base)/check-ins/\(.id)"
+                      }
+                  ],
+                  lastDeploy: (
+                    ((.deployMarkers // []) | first) as $d
+                    | if $d == null then null else {
+                        id: $d.id,
+                        createdAt: ($d.createdAt // ""),
+                        shortRevision: ($d.shortRevision // ""),
+                        user: ($d.user // ""),
+                        liveForInWords: ($d.liveForInWords // ""),
+                        exceptionCount: ($d.exceptionCount // 0),
+                        exceptionRate: ($d.exceptionRate // 0)
+                      } end
+                  )
+                }
+              | .totals = {
+                  errors: (.errors | length),
+                  perf: (.perf | length),
+                  monitors: (.monitors | length),
+                  monitorsDown: ([.monitors[] | select(.down)] | length),
+                  checkIns: (.checkIns | length),
+                  checkInsFailing: ([.checkIns[] | select(.failing)] | length)
+                }
+            ]
+          }
+      ]
+    }
+  | .totals = (
+      [.organizations[].apps[].totals]
+      | {
+          apps: length,
+          errors: (map(.errors) | add // 0),
+          perf: (map(.perf) | add // 0),
+          monitors: (map(.monitors) | add // 0),
+          monitorsDown: (map(.monitorsDown) | add // 0),
+          checkIns: (map(.checkIns) | add // 0),
+          checkInsFailing: (map(.checkInsFailing) | add // 0)
+        }
+    )
+' "$tmp/resp.json" | write_out

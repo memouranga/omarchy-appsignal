@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "memong.appsignal",
+  "name": "AppSignal",
+  "version": "0.1.0",
+  "author": "Memo Uranga",
+  "license": "MIT",
+  "description": "AppSignal at a glance: open error and performance incidents, uptime monitors, check-ins and last deploy for every app you can see, in a native Omarchy bar panel.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "AppSignal",
+    "description": "One bar icon with an alert dot, one panel: per-app counts of open errors, slow actions, uptime monitors down and failing check-ins, with click-to-open incident rows.",
+    "category": "Dev",
+    "aliases": [
+      "appsignal",
+      "apm",
+      "errors",
+      "uptime",
+      "monitoring"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 120,
+      "incidentsPerApp": 5
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 30,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 120
+      },
+      {
+        "key": "incidentsPerApp",
+        "type": "integer",
+        "label": "Incident rows per app",
+        "min": 1,
+        "max": 20,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}
