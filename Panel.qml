@@ -101,11 +101,61 @@ Panel {
     root.scrollToSelected()
   }
 
-  function activateRow() {
+  function activateRow() { root.activateSelected(false) }
+
+  function activateSelected(viaBrowser) {
     var rows = root.focusRows
     if (rows.length === 0 || !root.cursorActive) return
     var idx = root.clamp(root.selectedRowIndex, 0, rows.length - 1)
-    root.openUrl(rows[idx].url)
+    root.activateItem(rows[idx], viaBrowser)
+  }
+
+  // incidentAction setting: "agent" (default) sends error rows to the coding
+  // agent on Enter/left click; "browser" restores the v0.1 behavior. Monitor
+  // rows always open in the browser regardless of this setting.
+  readonly property string incidentAction: String(root.setting("incidentAction", "agent") || "agent")
+
+  function activateItem(row, viaBrowser) {
+    if (!row) return
+    if (row.kind === "error" && !viaBrowser && root.incidentAction !== "browser") {
+      root.investigate(row)
+      return
+    }
+    root.openUrl(row.url)
+  }
+
+  // Builds the one-line prompt from SPEC.md and hands it to the user's
+  // default coding agent in a new terminal (same as `omarchy agent crash`),
+  // then closes the panel. Empty fields (namespace, action, count, message,
+  // url, environment) are omitted gracefully.
+  function investigate(row) {
+    if (!row || !root.bar) return
+    var err = row.item || {}
+    var app = row.app || {}
+
+    var appPart = String(app.name || "")
+    if (app.environment) appPart += " (" + app.environment + ")"
+
+    var head = "Investigate AppSignal incident"
+    if (err.number) head += " #" + err.number
+    if (err.title) head += " \"" + err.title + "\""
+    if (appPart !== "") head += " in app " + appPart
+
+    var detail = []
+    if (err.namespace) detail.push("namespace " + err.namespace)
+    if (err.action) detail.push("action " + err.action)
+    if (Number(err.count || 0) > 0) detail.push(err.count + " occurrences")
+    if (err.lastOccurredAt) detail.push("last at " + err.lastOccurredAt)
+
+    var parts = [head + (detail.length > 0 ? ", " + detail.join(", ") : "") + "."]
+    if (err.message) parts.push("Message: " + err.message + ".")
+    if (err.url) parts.push("URL: " + err.url + ".")
+    parts.push("Use the AppSignal MCP to read the incident, its stack trace and recent " +
+      "samples; explain the probable root cause and propose a fix. Do not change the " +
+      "incident state or severity unless I ask.")
+
+    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.close()
   }
 
   function scrollToSelected() {
@@ -280,6 +330,7 @@ Panel {
         if (t === "r" || t === "R") root.refreshNow()
         else if (t === "g") root.jumpRows(0)
         else if (t === "G") root.jumpRows(root.focusRows.length - 1)
+        else if (t === "o" || t === "O") root.activateSelected(true)
       }
 
       Flickable {
@@ -656,14 +707,25 @@ Panel {
     }
 
     MouseArea {
+      id: errorMouse
       anchors.fill: parent
       hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
       cursorShape: Qt.PointingHandCursor
-      onClicked: root.openUrl(errorRow.url)
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[errorRow.flatIndex], mouse.button === Qt.RightButton)
+      }
       onEntered: {
         root.cursorActive = true
         root.selectedRowIndex = errorRow.flatIndex
       }
+    }
+
+    PanelToolTip {
+      visible: errorMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
     }
   }
 

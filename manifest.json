@@ -28,7 +28,8 @@
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 120,
-      "incidentsPerApp": 5
+      "incidentsPerApp": 5,
+      "incidentAction": "agent"
     },
     "schema": [
       {
@@ -48,6 +49,14 @@
         "max": 20,
         "step": 1,
         "defaultValue": 5
+      },
+      {
+        "key": "incidentAction",
+        "type": "enum",
+        "label": "Enter / left click on an incident",
+        "options": ["agent", "browser"],
+        "defaultValue": "agent",
+        "description": "\"agent\" runs `omarchy agent prompt` to investigate the incident; \"browser\" opens it on appsignal.com instead. Right-click or `o` always opens the browser."
       }
     ]
   }

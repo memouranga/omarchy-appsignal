@@ -56,14 +56,20 @@ It never goes into `shell.json`.
 
 | Action | Result |
 |---|---|
-| Left click | Toggle the panel |
-| Right click | Refresh now |
+| Left click on the bar icon | Toggle the panel |
+| Right click on the bar icon | Refresh now |
 | `j` / `k` | Next / previous row |
-| `Enter` | Open the selected incident or monitor in the browser |
+| `Enter` or left click on an error row | Investigate with your coding agent (or open the browser, see `incidentAction` below) |
+| Right click on an error row, or `o` | Open the incident in the browser |
+| `Enter` or click on a monitor row | Open the monitor in the browser (always) |
 | `g` / `G` | First / last row |
 | `r` | Refresh now |
 | `Tab` | Neighbouring bar panel |
 | `Esc` | Close |
+
+The `incidentAction` setting controls what `Enter`/left click do on an **error** row: `"agent"` (the
+default) hands it to your coding agent, `"browser"` opens it on appsignal.com like uptime monitors
+always do. Right click and `o` always mean "open in the browser", whatever the setting.
 
 Bind it to a key in `~/.config/hypr/bindings.lua`:
 
@@ -94,6 +100,35 @@ Set them on the widget entry in `~/.config/omarchy/shell.json`:
 |---|---|---|
 | `refreshIntervalSec` | `120` | Seconds between collector runs (min 30) |
 | `incidentsPerApp` | `5` | Open error rows shown per app |
+| `incidentAction` | `agent` | What `Enter`/left click do on an error row: `agent` or `browser` |
+
+## Investigate with your coding agent
+
+With `incidentAction` set to `agent` (the default), opening an error row runs
+`omarchy agent prompt "<prompt>"` — the same mechanism behind `omarchy agent crash`. It opens a
+terminal with **your default coding agent** (whatever `omarchy default agent` is set to) and hands
+it a one-line prompt built from the incident: app, environment, exception, namespace, action,
+occurrence count, last-seen time, message and URL. The agent is asked to use the AppSignal MCP to
+read the incident, its stack trace and recent samples, explain the probable root cause, and propose
+a fix — it is explicitly told not to change the incident's state or severity unless you ask. The
+plugin itself never mutates anything in AppSignal; only the agent does, and only in that session, if
+you tell it to.
+
+Run `omarchy default agent` to see or change which agent that is.
+
+This only works well once your agent can reach AppSignal's data, so connect the
+[AppSignal MCP server](https://docs.appsignal.com/mcp-server) first. For Claude Code:
+
+```bash
+claude mcp add --transport http appsignal https://appsignal.com/api/mcp \
+  --header "Authorization: Bearer <YOUR_MCP_TOKEN>"
+```
+
+The `<YOUR_MCP_TOKEN>` is an AppSignal **MCP token** (not the personal API key above), created from
+your AppSignal profile under **Account Settings → MCP Tokens**. Give it **read** permissions only —
+this plugin and the prompt it sends only need to read incidents, traces and samples, never to change
+them. See [docs.appsignal.com/mcp-server](https://docs.appsignal.com/mcp-server) for setup with other
+agents and for OAuth as an alternative to a Bearer token.
 
 ## Requirements and trust
 
