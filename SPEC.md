@@ -59,7 +59,8 @@ y `.../uptime-monitoring/<monitorId>`.
 ## Desarrollo
 - Proyecto: `~/work/omarchy-appsignal` (este repo).
 - Para probar: `ln -s ~/work/omarchy-appsignal ~/.config/omarchy/plugins/memong.appsignal`
-  y `omarchy plugin enable memong.appsignal right`. El shell recarga al guardar.
+  y `omarchy plugin enable memong.appsignal right`. OJO: con el symlink el shell
+  NO recarga solo al guardar; tras editar QML correr `omarchy restart shell`.
 - Validar: `omarchy plugin validate ~/work/omarchy-appsignal`.
 - Flujo: spec → shape → plan → ejecutar. Sonnet desarrolla, Opus prueba y
   arregla lo difícil, Fable valida y orquesta.

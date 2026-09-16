@@ -22,8 +22,8 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property string glyphHeartbeat: ""  // fa-heartbeat
-  readonly property string glyphBug: ""        // fa-bug
+  readonly property string glyphHeartbeat: "󰐰"  // mdi-pulse (U+F0430)
+  readonly property string glyphBug: "󰃤"        // mdi-bug (U+F00E4)
   readonly property string glyphUptime: "󰖟"     // globe
   readonly property string glyphRefresh: "󰑐"    // refresh
 
