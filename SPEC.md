@@ -118,3 +118,11 @@ sesión si el usuario lo pide.
 - schema: `{"key":"incidentAction","type":"select"|"string","label":"Enter / left click on an incident","options":["agent","browser"],"defaultValue":"agent"}`
   (ver qué tipo de campo soporta el schema: leer manifests de fábrica en
   /usr/share/omarchy/shell/plugins/**/manifest.json y el validador).
+
+## Nota de desarrollo (aprendida el 2026-09-16)
+NUNCA probar la acción de agente simulando teclas (wtype) o clics sobre el
+panel con datos reales: `bar.run(...)` ejecuta el comando de verdad y abre una
+sesión de Claude en modo auto sobre un incidente de producción. Para probar el
+comando armado, envolver la ejecución en un dry-run (por ejemplo, si existe la
+variable de entorno `OMARCHY_APPSIGNAL_DRY_RUN=1`, solo `console.log(cmd)` y no
+ejecutar) o revisar el string a ojo. La prueba real la hace Memo, a mano.
