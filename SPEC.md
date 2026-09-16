@@ -126,3 +126,61 @@ sesión de Claude en modo auto sobre un incidente de producción. Para probar el
 comando armado, envolver la ejecución en un dry-run (por ejemplo, si existe la
 variable de entorno `OMARCHY_APPSIGNAL_DRY_RUN=1`, solo `console.log(cmd)` y no
 ejecutar) o revisar el string a ojo. La prueba real la hace Memo, a mano.
+
+---
+
+# v0.3 — Fila de apps y solo favoritas
+
+Aprobado por Memo el 2026-09-16.
+
+## Fila de apps (tabs deslizables)
+- Arriba del panel (debajo del hero), una fila de `Button` (qs.Ui) con una
+  entrada por app visible: texto "Nombre · env" con env abreviado
+  (production→prod, development→dev, staging→stg; otros tal cual).
+- La fila va dentro de un `Flickable` con `flickableDirection:
+  Flickable.HorizontalFlick`, `clip: true`, ancho = ancho del panel; el
+  `Row` interior usa anchos naturales (NO cellWidth igual como agents). Rueda
+  del mouse sobre la fila desplaza horizontalmente (WheelHandler o
+  MouseArea.onWheel). Al seleccionar una app, asegurar que su botón quede
+  visible (ajustar contentX).
+- Botón seleccionado: `selected: true`; `hasCursor` cuando la zona de foco es
+  la fila. Punto de alerta (Rectangle pequeño, color urgent) en la esquina
+  del botón si esa app tiene errores abiertos o monitores caídos.
+- Debajo de la fila, SOLO la app seleccionada: encabezado (nombre, env,
+  resumen "N errors · M down"), sección OPEN ERRORS, sección UPTIME. Misma
+  presentación que hoy, pero de una app.
+- Si solo hay una app visible, la fila se oculta (`visible: apps.length > 1`).
+
+## Navegación
+- Zonas de foco: "apps" (la fila) y "rows" (las filas de la app). Up/Down
+  (k/j) cambia de zona como en dev.git; h/l o ←/→ cambian de app cuando el
+  foco está en la fila. `1`-`9` saltan a la app N. Enter en la fila = abrir la
+  app en el navegador.
+- Clic medio en el icono de la barra rota a la siguiente app (y si el panel
+  está cerrado, solo cambia la selección).
+- La app seleccionada se persiste en `~/.local/state/omarchy/appsignal/panel.json`
+  (`{"selectedAppId": "..."}`), patrón prefsFile de dev.git. Si la app ya no
+  existe, seleccionar la primera.
+- Al abrir el panel, la selección persistida se respeta (no se salta a la app
+  con más problemas). El orden de la fila sigue siendo "con problemas primero".
+
+## Solo favoritas
+- El colector pide `viewerPinned` en cada app y lo escribe como `pinned: bool`.
+- Main.qml expone `apps` ya filtradas: si el setting `onlyPinned` (default
+  true) está activo y hay ≥1 app con `pinned`, solo esas. Si no hay ninguna
+  fijada, se muestran todas y `Main.pinnedFallback = true`.
+- Panel: cuando `pinnedFallback`, mostrar una línea dim debajo del hero:
+  "Pin apps in AppSignal to show only those here".
+- Los totales de la barra (punto de alerta, tooltip) se calculan sobre las
+  apps visibles, no sobre todas.
+
+## Manifest
+- version → 0.3.0
+- schema: `{"key":"onlyPinned","type":"boolean","label":"Show only apps pinned in AppSignal","defaultValue":true}`
+  (verificar que exista el tipo boolean en manifests de fábrica; si no,
+  usar enum ["pinned","all"]). Agregar a `barWidget.defaults`.
+
+## README
+- Actualizar "What you get" (fila de apps, solo favoritas), tabla de teclas
+  (h/l, 1-9, clic medio), settings (`onlyPinned`) y cómo fijar apps en
+  AppSignal (el icono de pin/estrella en la lista de apps).
