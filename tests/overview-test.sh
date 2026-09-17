@@ -4,6 +4,7 @@
 # phase 2 data, one bare) and every field shape the panel (Main.qml/
 # Panel.qml) actually reads.
 
+# shellcheck source=helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "overview (happy path)"

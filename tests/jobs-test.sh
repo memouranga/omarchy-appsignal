@@ -6,6 +6,7 @@
 # (always warns), a healthy queue, and one meant to be dropped by
 # ignoreQueues.
 
+# shellcheck source=helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "jobs: queues"

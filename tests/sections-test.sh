@@ -6,6 +6,7 @@
 # -sections and getting empty results back proves the request was actually
 # skipped, not just coincidentally empty.
 
+# shellcheck source=helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "sections: off skips the phase 2 request"

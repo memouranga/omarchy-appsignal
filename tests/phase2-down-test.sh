@@ -6,6 +6,7 @@
 # never take the whole overview down: ready stays true, and that app's
 # phase-2-only fields degrade to null/[] instead of erroring.
 
+# shellcheck source=helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "phase 2 down"

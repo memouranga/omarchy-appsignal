@@ -4,6 +4,7 @@
 # collector must say so and stop before ever looking at the network (or, in
 # this suite, at APPSIGNAL_FIXTURE_DIR — deliberately not set here).
 
+# shellcheck source=helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "no token"

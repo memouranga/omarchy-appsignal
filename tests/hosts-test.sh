@@ -5,6 +5,7 @@
 # the absolute figure instead; swap does have a total row, so swapPct must
 # be a real percentage. Also checks the cpu/disk warn thresholds.
 
+# shellcheck source=helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "servers: host metrics"

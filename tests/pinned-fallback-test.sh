@@ -7,6 +7,7 @@
 # fixtures/nopinned/ has two apps, neither pinned, each with a distinct
 # health fixture so both being present proves both were fetched.
 
+# shellcheck source=helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "phase 2 fallback: no app pinned"
