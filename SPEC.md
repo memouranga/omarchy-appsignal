@@ -184,3 +184,126 @@ Aprobado por Memo el 2026-09-16.
 - Actualizar "What you get" (fila de apps, solo favoritas), tabla de teclas
   (h/l, 1-9, clic medio), settings (`onlyPinned`) y cómo fijar apps en
   AppSignal (el icono de pin/estrella en la lista de apps).
+
+---
+
+# v0.4 — Performance, salud y deploy
+
+Aprobado por Memo el 2026-09-17.
+
+## API de métricas — consultas verificadas (2026-09-17)
+
+Verificado con curl contra SkillsNT prod (`site_id 69447d2f1caf1b2e8cb38c68`) y
+CloudHealth prod (`site_id 69798e1fc073d8fe2f86155d`), organización `grupo-9t-1`.
+Endpoint `POST https://appsignal.com/api/v2/metrics/list`, header
+`Authorization: Bearer <token>`.
+
+### Línea de salud (última hora)
+
+Un solo POST con los tres selectores juntos (misma ventana, mismo `group_by`):
+
+```json
+{
+  "site_id": "<app id>",
+  "from": "<now - 1h, ISO8601>",
+  "to": "<now, ISO8601>",
+  "resolution": "MINUTELY",
+  "select": [
+    {"id": "throughput", "name": "site_throughput", "tags": {}, "field": "COUNTER", "aggregation": "SUM"},
+    {"id": "errorRate", "name": "error_rate", "tags": {"namespace": "web"}, "field": "GAUGE", "aggregation": "AVERAGE"},
+    {"id": "meanMs", "name": "transaction_duration", "tags": {"namespace": "web"}, "field": "MEAN", "aggregation": "AVERAGE"}
+  ],
+  "group_by": ["Name"],
+  "limit": 10
+}
+```
+
+Respuesta: una fila por métrica (porque `group_by` es `["Name"]`), cada una con
+su propio selector en `data`; se combinan con `[.rows[].data] | add`.
+Ejemplo real (SkillsNT prod, 17:01–18:00 UTC): `throughput: 2693` (requests en
+la hora — `SUM` sobre `MINUTELY` ya da el total de la ventana, no hace falta
+dividir), `errorRate: 0.0` (fracción 0–1; confirmado no-cero en otra ventana:
+`0.01` = 1%), `meanMs: 4.55` (ms). CloudHealth prod: `throughput: 2473`,
+`errorRate: 0.0`, `meanMs: 537.86`.
+
+Notas de la API aprendidas a la fuerza:
+- `site_throughput` no tiene tags (`available_tags: []`); pedirlo con un tag
+  cualquiera lo rechaza. Tipo `COUNTER` → `field: "COUNTER"`.
+- `error_rate` es tipo `GAUGE`, tags disponibles incluyen `namespace` y
+  `namespace+action`; para la línea de salud basta `namespace: "web"` sin
+  comodín (es el propio valor, no hace falta `group_by` extra).
+- `transaction_duration` es tipo `MEASUREMENT` (no GAUGE/COUNTER): sus campos
+  válidos son `MEAN`/`COUNT`/`MIN`/`MAX`/`P99`... — nunca `GAUGE`. Pedirlo con
+  `tags: {}` (sin namespace) da `rows: []` vacío; hace falta al menos un tag
+  fijo (`namespace: "web"`) o, si se usa comodín `"*"` en un tag, ese tag
+  **debe** entrar también en `group_by` o la API responde
+  `{"error":"ungrouped_wildcard", "message":"Wildcard for tag 'namespace' requires a matching group_by entry..."}`.
+- Cuando la app no tuvo tráfico en la ventana, `transaction_duration` devuelve
+  `rows: []` (visto con BahBah prod, 1 sola request en la hora) — tratar como
+  `meanMs: null`, no como error.
+- El namespace usado para salud es `web` (deja fuera `background`): mezclar
+  namespaces da medias sin sentido (en SkillsNT, `background` promedia ~95 ms
+  por unos pocos jobs largos, muy distinto a los ~4.5 ms del tráfico web real).
+
+### Slowest actions (24h)
+
+```json
+{
+  "site_id": "<app id>",
+  "from": "<now - 24h, ISO8601>",
+  "to": "<now, ISO8601>",
+  "resolution": "HOURLY",
+  "select": [
+    {"id": "meanMs", "name": "transaction_duration", "tags": {"namespace": "*", "action": "*"}, "field": "MEAN", "aggregation": "AVERAGE"},
+    {"id": "count", "name": "transaction_duration", "tags": {"namespace": "*", "action": "*"}, "field": "COUNT", "aggregation": "SUM"}
+  ],
+  "group_by": [{"Tag": "action"}, {"Tag": "namespace"}],
+  "limit": 100
+}
+```
+
+Sí acepta **dos** entradas de `group_by` a la vez (una por tag) — cada fila
+trae `group: {action, namespace}` y `data: {meanMs, count}`. Se ordena por
+`meanMs` descendente en el cliente (`jq 'sort_by(-.data.meanMs)'`) y se recorta
+a N = `incidentsPerApp`. Con comodín `"*"` en `action`/`namespace` **ambos**
+tags deben estar en `group_by` (mismo error `ungrouped_wildcard` si falta
+alguno). Devuelve tanto acciones `web` como jobs `background` — se dejan
+mezcladas (el roadmap solo pide "top acciones por duración media", sin excluir
+background; de hecho ahí aparecen los jobs realmente lentos).
+Ejemplo real, SkillsNT prod 24h: 147 filas; top por media,
+`SubscriberStatsRefreshJob#perform` (background) 59000 ms / 1×,
+`GarminTokenRefreshJob#perform` (background) 26636 ms / 1×,
+`DailyWodDeliveryJob#perform` (background) 4379.5 ms / 24×. CloudHealth prod
+24h, top web: `HospitalizacionsController#index` 5518 ms / 2×,
+`GruposSaludDashboardController#index` 4111.4 ms / 12×,
+`RecetaController#finalizar_receta` 3071.6 ms / 15×.
+
+### Tiempos observados
+Cada POST (salud o slow actions) tarda ~0.7–0.8 s contra la API real. Con 2
+apps fijadas en paralelo, la fase 2 completa añade bien menos de 2 s al
+colector.
+
+## Colector — segunda fase (solo lectura de métricas)
+
+- Apps candidatas: las que traen `viewerPinned: true` en la respuesta GraphQL
+  de la fase 1 (sin importar el setting `onlyPinned`, que es de presentación,
+  no de recolección); si ninguna está fijada, las primeras 6 de la lista
+  completa (todas las orgs, en el orden que ya trae la API).
+- Por cada app candidata, en paralelo (subshell `&` + `wait` al final), dos
+  POST a `metrics/list` (salud 1h, slow actions 24h) con su propio
+  `--max-time` (opción nueva `-metrics-timeout`, default 20s).
+- Si cualquiera de los dos POST de una app falla (HTTP≠200, timeout, JSON
+  inválido, o "ungrouped_wildcard" u otro error de la API): esa app se queda
+  con `health: null` / `slowActions: []`, nunca aborta el resto del colector
+  ni pone `ready:false` en el overview completo.
+- Apps que no fueron candidatas (no pineadas y fuera del tope de 6 del
+  fallback) también quedan con `health: null` / `slowActions: []`.
+- La fase 1 (GraphQL) y la transformación a JSON no cambian de forma; la fase
+  2 solo añade `health` y `slowActions` a cada objeto de app ya construido,
+  después, por un merge jq con los ids de app como llave.
+
+### Forma de los campos nuevos por app
+```json
+"health": { "throughput": 2693, "errorRate": 0.0, "meanMs": 4.55, "window": "1h" } | null,
+"slowActions": [ { "action": "WelcomeController#home", "namespace": "web", "meanMs": 4.78, "count": 12 } ]
+```

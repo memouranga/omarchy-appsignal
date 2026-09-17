@@ -32,6 +32,7 @@ Panel {
   readonly property string glyphBug: "󰃤"        // mdi-bug (U+F00E4)
   readonly property string glyphUptime: "󰖟"     // globe
   readonly property string glyphRefresh: "󰑐"    // refresh
+  readonly property string glyphSpeedometer: "󰓅" // mdi-speedometer (U+F04C5)
 
   // ---------------------------------------------------------------- rows
 
@@ -65,6 +66,18 @@ Panel {
     var errs = root.asList(app.errors)
     for (var j = 0; j < errs.length; j++)
       rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
+    // PERFORMANCE: open incidents take priority (rare — AppSignal auto-closes
+    // them); with none open, fall back to the 24h slowest actions the
+    // collector's metrics phase computed. Never both at once.
+    var perf = root.asList(app.perf)
+    if (perf.length > 0) {
+      for (var p = 0; p < perf.length; p++)
+        rows.push({ kind: "perf", app: app, item: perf[p], url: perf[p].url })
+    } else {
+      var slow = root.asList(app.slowActions)
+      for (var s = 0; s < slow.length; s++)
+        rows.push({ kind: "slow", app: app, item: slow[s], url: app.perfUrl })
+    }
     var mons = root.asList(app.monitors)
     for (var k = 0; k < mons.length; k++)
       rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
@@ -238,6 +251,10 @@ Panel {
       root.investigate(row)
       return
     }
+    if ((row.kind === "perf" || row.kind === "slow") && !viaBrowser && root.incidentAction !== "browser") {
+      root.investigatePerf(row)
+      return
+    }
     root.openUrl(row.url)
   }
 
@@ -270,6 +287,50 @@ Panel {
     parts.push("Use the AppSignal MCP to read the incident, its stack trace and recent " +
       "samples; explain the probable root cause and propose a fix. Do not change the " +
       "incident state or severity unless I ask.")
+
+    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.close()
+  }
+
+  // Same pattern as investigate(), for a PERFORMANCE row: an open performance
+  // incident ("perf") or one of the 24h slowest actions ("slow"). The slow-
+  // action wording is the one from SPEC.md verbatim; the open-incident one
+  // mirrors investigate()'s error wording since AppSignal rarely leaves one
+  // open (both apps we develop against have 0).
+  function investigatePerf(row) {
+    if (!row || !root.bar) return
+    var it = row.item || {}
+    var app = row.app || {}
+
+    var appPart = String(app.name || "")
+    if (app.environment) appPart += " (" + app.environment + ")"
+
+    var action = String(it.action || "")
+    var namespace = String(it.namespace || "")
+    var count = Number(it.count || 0)
+    var url = String(it.url || app.perfUrl || "")
+
+    var parts
+    if (row.kind === "slow") {
+      var meanMs = Math.round(Number(it.meanMs || 0))
+      parts = ["Investigate slow action " + action + " (" + namespace + ") in app " + appPart +
+        ": mean " + meanMs + " ms over " + count + " requests in the last 24h."]
+    } else {
+      var head = "Investigate AppSignal performance incident"
+      if (it.number) head += " #" + it.number
+      if (action !== "") head += " \"" + action + "\""
+      if (appPart !== "") head += " in app " + appPart
+      var detail = []
+      if (namespace !== "") detail.push("namespace " + namespace)
+      if (Number(it.mean || 0) > 0) detail.push("mean " + Math.round(Number(it.mean)) + " ms")
+      if (count > 0) detail.push(count + " occurrences")
+      if (it.lastOccurredAt) detail.push("last at " + it.lastOccurredAt)
+      parts = [head + (detail.length > 0 ? ", " + detail.join(", ") : "") + "."]
+    }
+
+    if (url !== "") parts.push("URL: " + url + ".")
+    parts.push("Use the AppSignal MCP to inspect performance samples and span breakdowns; find the " +
+      "bottleneck and propose optimizations. Do not change anything in AppSignal unless I ask.")
 
     root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
     root.close()
@@ -343,6 +404,47 @@ Panel {
     var parts = []
     if (errs > 0) parts.push(errs + (errs === 1 ? " error" : " errors"))
     if (down > 0) parts.push(down + " down")
+    return parts.join(" · ")
+  }
+
+  // "1.2k" for 1200, "254" for 254 — one decimal above 1000, trimmed when
+  // it would just be ".0".
+  function formatCount(n) {
+    if (!isFinite(n)) return "0"
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k"
+    return String(Math.round(n))
+  }
+
+  // The health line under the app header: "1.2k req/h · 0.4% errors · 182 ms
+  // mean" (last hour). Any missing field is omitted, not zeroed; with no
+  // health at all (app outside the collector's metrics phase, or that phase
+  // failed for it) this returns "" and the caller hides the line entirely.
+  function healthLine(app) {
+    var h = app ? app.health : null
+    if (!h || typeof h !== "object") return ""
+    var parts = []
+    if (h.throughput !== null && h.throughput !== undefined)
+      parts.push(root.formatCount(Number(h.throughput)) + " req/h")
+    if (h.errorRate !== null && h.errorRate !== undefined)
+      parts.push((Number(h.errorRate) * 100).toFixed(1) + "% errors")
+    if (h.meanMs !== null && h.meanMs !== undefined)
+      parts.push(Math.round(Number(h.meanMs)) + " ms mean")
+    return parts.join(" · ")
+  }
+
+  // Foot line: "deploy 8a7eda9 · memo · 21d ago · 3 errors since". AppSignal
+  // hands back a synthetic marker for apps that never really deployed
+  // (shortRevision "No deploy yet"); treat that the same as no deploy at all.
+  function deployLine(app) {
+    var d = app ? app.lastDeploy : null
+    if (!d || typeof d !== "object") return ""
+    var rev = String(d.shortRevision || "")
+    if (rev === "" || rev === "No deploy yet") return ""
+    var parts = ["deploy " + rev]
+    if (d.user && d.user !== "N/A") parts.push(String(d.user))
+    if (d.liveForInWords) parts.push(String(d.liveForInWords) + " ago")
+    var errCount = Number(d.exceptionCount || 0)
+    if (errCount > 0) parts.push(errCount + (errCount === 1 ? " error" : " errors") + " since")
     return parts.join(" · ")
   }
 
@@ -681,6 +783,12 @@ Panel {
             readonly property var app: root.selectedApp || ({})
             readonly property var errs: root.asList(appSection.app.errors)
             readonly property var mons: root.asList(appSection.app.monitors)
+            readonly property var perfIncidents: root.asList(appSection.app.perf)
+            readonly property var slowActions: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowActions)
+            // Where the PERFORMANCE rows (perf incidents, or their slow-action
+            // fallback) sit in focusRows: right after the error rows.
+            readonly property int perfRowCount: appSection.perfIncidents.length > 0 ? appSection.perfIncidents.length : appSection.slowActions.length
+            readonly property int monitorFlatOffset: appSection.errs.length + appSection.perfRowCount
 
             PanelSeparator { foreground: root.foreground }
 
@@ -736,6 +844,17 @@ Panel {
               }
             }
 
+            // ---- Health (last hour) ----
+            Text {
+              width: parent.width
+              text: root.healthLine(appSection.app)
+              visible: text !== ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
             // ---- Open errors ----
             Column {
               width: parent.width
@@ -771,6 +890,62 @@ Panel {
               }
             }
 
+            // ---- Performance ----
+            // Open performance incidents when there are any (AppSignal auto-
+            // closes these, so it is rare); otherwise the 24h slowest actions
+            // the collector's metrics phase computed. Hidden entirely when
+            // neither exists (app outside that phase, or nothing slow).
+            Column {
+              width: parent.width
+              visible: appSection.perfIncidents.length > 0 || appSection.slowActions.length > 0
+              spacing: Style.space(6)
+
+              PanelSectionHeader {
+                width: parent.width
+                visible: appSection.perfIncidents.length > 0
+                text: "PERFORMANCE"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Text {
+                width: parent.width
+                visible: appSection.perfIncidents.length === 0 && appSection.slowActions.length > 0
+                text: "SLOWEST ACTIONS · 24H"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
+              }
+
+              Repeater {
+                model: appSection.perfIncidents
+
+                PerfRow {
+                  required property var modelData
+                  required property int index
+
+                  width: appSection.width
+                  perf: modelData
+                  flatIndex: appSection.errs.length + index
+                }
+              }
+
+              Repeater {
+                model: appSection.slowActions
+
+                SlowActionRow {
+                  required property var modelData
+                  required property int index
+
+                  width: appSection.width
+                  action: modelData
+                  flatIndex: appSection.errs.length + index
+                }
+              }
+            }
+
             // ---- Uptime ----
             Column {
               width: parent.width
@@ -793,8 +968,26 @@ Panel {
 
                   width: appSection.width
                   mon: modelData
-                  flatIndex: appSection.errs.length + index
+                  flatIndex: appSection.monitorFlatOffset + index
                 }
+              }
+            }
+
+            // ---- Deploy ----
+            Text {
+              width: parent.width
+              text: root.deployLine(appSection.app)
+              visible: text !== ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.openUrl(appSection.app.deploysUrl)
               }
             }
           }
@@ -1020,6 +1213,238 @@ Panel {
         root.cursorActive = true
         root.selectedRowIndex = monitorRow.flatIndex
       }
+    }
+  }
+
+  // One open performance incident: speedometer glyph, action name, namespace
+  // + mean + count, and how long ago it last occurred. Same click pattern as
+  // ErrorRow, routed through investigatePerf() instead of investigate().
+  component PerfRow: CursorSurface {
+    id: perfRow
+
+    property var perf: null
+    property int flatIndex: -1
+
+    readonly property string title: perfRow.perf ? String(perfRow.perf.action || perfRow.perf.title || "") : ""
+    readonly property string namespace: perfRow.perf ? String(perfRow.perf.namespace || "") : ""
+    readonly property real meanMs: perfRow.perf ? Number(perfRow.perf.mean || 0) : 0
+    readonly property int count: perfRow.perf ? Number(perfRow.perf.count || 0) : 0
+    readonly property string meta: {
+      var parts = []
+      if (perfRow.namespace !== "") parts.push(perfRow.namespace)
+      if (perfRow.meanMs > 0) parts.push(Math.round(perfRow.meanMs) + " ms")
+      if (perfRow.count > 0) parts.push(perfRow.count + "×")
+      return parts.join("  ·  ")
+    }
+    readonly property string url: perfRow.perf ? String(perfRow.perf.url || "") : ""
+    readonly property string lastOccurredAt: perfRow.perf ? String(perfRow.perf.lastOccurredAt || "") : ""
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === perfRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(perfRow.flatIndex, perfRow)
+    Component.onDestruction: root.unregisterRow(perfRow.flatIndex, perfRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowAge.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphSpeedometer
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: perfRow.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowMeta
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: perfRow.meta
+          visible: text !== ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    Text {
+      id: rowAge
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.top: rowBody.top
+      text: root.timeAgo(perfRow.lastOccurredAt, root.nowMs)
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    MouseArea {
+      id: perfMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[perfRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = perfRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: perfMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
+    }
+  }
+
+  // One of the 24h slowest actions (shown only when the app has no open
+  // performance incident): speedometer glyph, action name, namespace, and
+  // "182 ms · 340×" on the right. Same click pattern as PerfRow.
+  component SlowActionRow: CursorSurface {
+    id: slowRow
+
+    property var action: null
+    property int flatIndex: -1
+
+    readonly property string title: slowRow.action ? String(slowRow.action.action || "") : ""
+    readonly property string namespace: slowRow.action ? String(slowRow.action.namespace || "") : ""
+    readonly property real meanMs: slowRow.action ? Number(slowRow.action.meanMs || 0) : 0
+    readonly property int count: slowRow.action ? Number(slowRow.action.count || 0) : 0
+    readonly property string stat: Math.round(slowRow.meanMs) + " ms  ·  " + slowRow.count + "×"
+    readonly property string url: slowRow.action ? String(slowRow.action.url || "") : ""
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === slowRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(slowRow.flatIndex, slowRow)
+    Component.onDestruction: root.unregisterRow(slowRow.flatIndex, slowRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowStat.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphSpeedometer
+          color: root.alpha(root.foreground, 0.60)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: slowRow.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowMeta
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: slowRow.namespace
+          visible: text !== "" && text !== "web"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    Text {
+      id: rowStat
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: rowBody.verticalCenter
+      text: slowRow.stat
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    MouseArea {
+      id: slowMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[slowRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = slowRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: slowMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
     }
   }
 }

@@ -29,7 +29,10 @@
 - **A row of app tabs.** A slidable row of every app your token can see, apps with trouble sorted first and marked with a dot. Only the selected app's details show below it.
 - **Only your favorites, if you have any.** Pin apps in AppSignal and the row shows just those; if nothing is pinned, it shows everything and says so.
 - **Open errors.** The latest open exception incidents for the selected app: exception class, action, occurrence count and age. Click one and it opens in AppSignal.
+- **Health at a glance.** A line under the app header with the last hour's throughput, error rate and mean response time — shown for pinned apps (the ones the collector fetches metrics for); omitted when there is nothing to show.
+- **Performance.** Open performance incidents when AppSignal has any (rare, it auto-closes them); otherwise the 24h slowest actions with their mean duration and request count.
 - **Uptime monitors.** Each monitor with its up/down state and, when down, since when. Click to open it.
+- **Last deploy.** A line at the foot of the app with the revision, who deployed it, how long it has been live, and errors since — when AppSignal has a real deploy marker for that app.
 - **Keyboard first.** `j`/`k` walk the rows, `h`/`l` (or `←`/`→`) switch apps, `1`-`9` jump to an app, `Enter` opens, `r` refreshes, `g`/`G` jump, `Esc` closes.
 - **Honest about staleness.** If AppSignal is unreachable the last good data stays on screen, marked `STALE`.
 - **Nothing to build.** Bash, `curl` and `jq` collect; QML paints. Clone it and it runs.
@@ -63,18 +66,21 @@ It never goes into `shell.json`.
 | `h` / `l` or `←` / `→` (apps row focused) | Previous / next app |
 | `1`-`9` | Jump to app N in the row |
 | Click an app tab, or `Enter` with the apps row focused | Open the app in the browser |
-| `j` / `k` | Switch focus between the apps row and the error/monitor rows, then walk them |
+| `j` / `k` | Switch focus between the apps row and the error/performance/monitor rows, then walk them |
 | `Enter` or left click on an error row | Investigate with your coding agent (or open the browser, see `incidentAction` below) |
 | Right click on an error row, or `o` | Open the incident in the browser |
+| `Enter` or left click on a performance row | Investigate with your coding agent (or open the browser, see `incidentAction` below) |
+| Right click on a performance row, or `o` | Open it in the browser |
 | `Enter` or click on a monitor row | Open the monitor in the browser (always) |
 | `g` / `G` | First / last row |
 | `r` | Refresh now |
 | `Tab` | Neighbouring bar panel |
 | `Esc` | Close |
 
-The `incidentAction` setting controls what `Enter`/left click do on an **error** row: `"agent"` (the
-default) hands it to your coding agent, `"browser"` opens it on appsignal.com like uptime monitors
-always do. Right click and `o` always mean "open in the browser", whatever the setting.
+The `incidentAction` setting controls what `Enter`/left click do on an **error** or **performance**
+row: `"agent"` (the default) hands it to your coding agent, `"browser"` opens it on appsignal.com
+like uptime monitors always do. Right click and `o` always mean "open in the browser", whatever the
+setting.
 
 Only the selected app's errors and monitors are shown. Your selection is remembered across panel
 opens (`~/.local/state/omarchy/appsignal/panel.json`); if the saved app is gone, the first one in
@@ -127,9 +133,10 @@ terminal with **your default coding agent** (whatever `omarchy default agent` is
 it a one-line prompt built from the incident: app, environment, exception, namespace, action,
 occurrence count, last-seen time, message and URL. The agent is asked to use the AppSignal MCP to
 read the incident, its stack trace and recent samples, explain the probable root cause, and propose
-a fix — it is explicitly told not to change the incident's state or severity unless you ask. The
-plugin itself never mutates anything in AppSignal; only the agent does, and only in that session, if
-you tell it to.
+a fix — it is explicitly told not to change the incident's state or severity unless you ask. Opening
+a performance row works the same way, with a prompt built from an open performance incident or a
+24h slowest action instead. The plugin itself never mutates anything in AppSignal; only the agent
+does, and only in that session, if you tell it to.
 
 Run `omarchy default agent` to see or change which agent that is.
 
@@ -164,16 +171,23 @@ Main.qml                runs the collector on a timer, watches the file
 Panel.qml               the bar icon and the panel
 ```
 
-The collector asks the [AppSignal GraphQL API](https://docs.appsignal.com/api/graphql) for every
-organization and app, their open exception incidents and uptime monitors with alerts, in a single request.
-A monitor counts as down when it carries an alert in `OPEN` or `WARMUP` state.
+The collector runs in two phases. First, one GraphQL request asks the
+[AppSignal GraphQL API](https://docs.appsignal.com/api/graphql) for every organization and app, their
+open exception and performance incidents, uptime monitors with alerts, check-in triggers and the last
+deploy marker. A monitor counts as down when it carries an alert in `OPEN` or `WARMUP` state.
+
+Second, for apps pinned in AppSignal only (or, with nothing pinned, the first 6 apps — to keep the
+request count bounded), two read-only requests to the
+[metrics API](https://docs.appsignal.com/api/v2/metrics.md) fetch the last hour's health (throughput,
+error rate, mean duration) and the 24h slowest actions. This phase runs in parallel per app with its
+own timeout; if it fails for an app, that app's health line and performance section are simply empty —
+the rest of the overview is unaffected. The exact queries are documented in `SPEC.md` ("v0.4").
 
 ## Roadmap
 
-- Performance incidents
 - Check-ins (cron and heartbeat)
 - Host metrics
-- Last deploy per app
+- Jobs and alerts
 
 ## Contributing
 

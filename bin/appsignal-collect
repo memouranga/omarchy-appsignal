@@ -13,17 +13,21 @@ set -uo pipefail
 
 readonly SCHEMA_VERSION=1
 readonly ENDPOINT="https://appsignal.com/graphql"
+readonly METRICS_ENDPOINT="https://appsignal.com/api/v2/metrics/list"
+readonly MAX_PHASE2_APPS=6
 
 output=""
 limit=5
 timeout=30
+metrics_timeout=20
 
 usage() {
   cat <<'USAGE'
 Usage: appsignal-collect [options]
-  -output PATH     Write the overview JSON here (default: stdout)
-  -limit N         Incident rows per app (default: 5)
-  -timeout SECS    Request deadline (default: 30)
+  -output PATH            Write the overview JSON here (default: stdout)
+  -limit N                Incident rows per app, also top N slow actions (default: 5)
+  -timeout SECS           GraphQL request deadline (default: 30)
+  -metrics-timeout SECS   Per-request deadline for the metrics API phase (default: 20)
 USAGE
 }
 
@@ -32,12 +36,14 @@ while (($#)); do
     -output|--output) output=$2; shift 2 ;;
     -limit|--limit) limit=$2; shift 2 ;;
     -timeout|--timeout) timeout=$2; shift 2 ;;
+    -metrics-timeout|--metrics-timeout) metrics_timeout=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "appsignal-collect: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 [[ $limit =~ ^[0-9]+$ ]] || limit=5
 [[ $timeout =~ ^[0-9]+$ ]] || timeout=30
+[[ $metrics_timeout =~ ^[0-9]+$ ]] || metrics_timeout=20
 
 for tool in curl jq; do
   command -v "$tool" >/dev/null 2>&1 || { echo "appsignal-collect: $tool is required" >&2; exit 1; }
@@ -337,4 +343,111 @@ jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
           checkInsFailing: (map(.checkInsFailing) | add // 0)
         }
     )
-' "$tmp/resp.json" | write_out
+' "$tmp/resp.json" > "$tmp/phase1.json"
+
+# --------------------------------------------------------- phase 2: metrics
+#
+# Second pass, read-only, against /api/v2/metrics/list: per-hour health
+# (throughput, error rate, mean duration) and 24h slowest actions, but only
+# for apps pinned in AppSignal (viewerPinned) — or, if none is pinned, the
+# first MAX_PHASE2_APPS apps overall. One failing app never blocks the rest
+# of the overview: it just keeps health:null / slowActions:[]. See SPEC.md
+# "v0.4" for the exact queries and why each field/tag/aggregation was chosen.
+
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+hours_ago_utc() { date -u -d "-$1 hour" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-"$1"H +%Y-%m-%dT%H:%M:%SZ; }
+
+mapfile -t all_app_ids < <(jq -r '(.data.viewer.organizations // [])[] | (.apps // [])[] | .id' "$tmp/resp.json")
+mapfile -t pinned_app_ids < <(jq -r '(.data.viewer.organizations // [])[] | (.apps // [])[] | select(.viewerPinned == true) | .id' "$tmp/resp.json")
+
+phase2_ids=()
+if ((${#pinned_app_ids[@]} > 0)); then
+  phase2_ids=("${pinned_app_ids[@]}")
+else
+  phase2_ids=("${all_app_ids[@]:0:$MAX_PHASE2_APPS}")
+fi
+
+fetch_phase2_app() {
+  local app_id=$1 health_out=$2 slow_out=$3
+  local from1 to1 from24 to24 health_body slow_body hc sc
+
+  to1=$(now_utc)
+  from1=$(hours_ago_utc 1)
+  to24=$to1
+  from24=$(hours_ago_utc 24)
+
+  health_body=$(jq -n --arg site "$app_id" --arg from "$from1" --arg to "$to1" '
+    {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
+     select:[
+       {id:"throughput", name:"site_throughput", tags:{}, field:"COUNTER", aggregation:"SUM"},
+       {id:"errorRate", name:"error_rate", tags:{namespace:"web"}, field:"GAUGE", aggregation:"AVERAGE"},
+       {id:"meanMs", name:"transaction_duration", tags:{namespace:"web"}, field:"MEAN", aggregation:"AVERAGE"}
+     ],
+     group_by:["Name"], limit:10}')
+
+  slow_body=$(jq -n --arg site "$app_id" --arg from "$from24" --arg to "$to24" '
+    {site_id:$site, from:$from, to:$to, resolution:"HOURLY",
+     select:[
+       {id:"meanMs", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"MEAN", aggregation:"AVERAGE"},
+       {id:"count", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"COUNT", aggregation:"SUM"}
+     ],
+     group_by:[{Tag:"action"}, {Tag:"namespace"}], limit:100}')
+
+  hc=$(curl -sS --max-time "$metrics_timeout" \
+    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+    -X POST "$METRICS_ENDPOINT" -d "$health_body" -o "$health_out.raw" -w '%{http_code}' 2>/dev/null) || hc=000
+  sc=$(curl -sS --max-time "$metrics_timeout" \
+    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+    -X POST "$METRICS_ENDPOINT" -d "$slow_body" -o "$slow_out.raw" -w '%{http_code}' 2>/dev/null) || sc=000
+
+  if [[ $hc == 200 ]] && jq -e '.rows and (.error | not)' "$health_out.raw" >/dev/null 2>&1; then
+    jq '
+      ([.rows[].data] | add // {}) as $d
+      | if ($d.throughput == null and $d.errorRate == null and $d.meanMs == null) then null
+        else { throughput: $d.throughput, errorRate: $d.errorRate, meanMs: $d.meanMs, window: "1h" }
+        end
+    ' "$health_out.raw" > "$health_out" 2>/dev/null || echo null > "$health_out"
+  else
+    echo null > "$health_out"
+  fi
+
+  if [[ $sc == 200 ]] && jq -e '.rows and (.error | not)' "$slow_out.raw" >/dev/null 2>&1; then
+    jq --argjson n "$limit" '
+      [ (.rows // [])[]
+        | select(.data.meanMs != null)
+        | { action: (.group.action // ""), namespace: (.group.namespace // ""),
+            meanMs: (.data.meanMs // 0), count: (.data.count // 0) }
+      ] | sort_by(-.meanMs) | .[0:$n]
+    ' "$slow_out.raw" > "$slow_out" 2>/dev/null || echo '[]' > "$slow_out"
+  else
+    echo '[]' > "$slow_out"
+  fi
+}
+
+if ((${#phase2_ids[@]} > 0)); then
+  for app_id in "${phase2_ids[@]}"; do
+    fetch_phase2_app "$app_id" "$tmp/health_$app_id.json" "$tmp/slow_$app_id.json" &
+  done
+  wait
+fi
+
+{
+  echo '{}'
+  for app_id in "${phase2_ids[@]}"; do
+    jq -n --arg id "$app_id" \
+      --slurpfile h <(cat "$tmp/health_$app_id.json" 2>/dev/null || echo null) \
+      --slurpfile s <(cat "$tmp/slow_$app_id.json" 2>/dev/null || echo '[]') \
+      '{($id): {health: ($h[0] // null), slowActions: ($s[0] // [])}}'
+  done
+} | jq -s 'add' > "$tmp/phase2.json"
+
+jq --slurpfile p2 "$tmp/phase2.json" '
+  ($p2[0] // {}) as $p2
+  | .organizations = [
+      .organizations[]
+      | .apps = [
+          .apps[]
+          | . + { health: ($p2[.id].health // null), slowActions: ($p2[.id].slowActions // []) }
+        ]
+    ]
+' "$tmp/phase1.json" | write_out

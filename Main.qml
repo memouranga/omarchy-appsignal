@@ -157,7 +157,12 @@ Item {
           monitors: Array.isArray(a.monitors) ? a.monitors : [],
           checkIns: Array.isArray(a.checkIns) ? a.checkIns : [],
           lastDeploy: a.lastDeploy && typeof a.lastDeploy === "object" ? a.lastDeploy : null,
-          totals: a.totals && typeof a.totals === "object" ? a.totals : ({})
+          totals: a.totals && typeof a.totals === "object" ? a.totals : ({}),
+          // v0.4: 1h health (throughput/errorRate/meanMs) and 24h slowest
+          // actions, only populated for apps the collector's metrics phase
+          // covered (pinned apps, or the fallback first 6). null/[] otherwise.
+          health: a.health && typeof a.health === "object" ? a.health : null,
+          slowActions: Array.isArray(a.slowActions) ? a.slowActions : []
         })
       }
     }
