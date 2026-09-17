@@ -498,6 +498,88 @@ app.url"), clic derecho/`o` en una fila de host abre `app.url`.
 Spec de Fable, 2026-09-17. Sonnet investiga primero la API (solo lectura) y
 documenta aquí las consultas exactas antes de implementar.
 
+## Investigación de la API (2026-09-17)
+
+Verificado con curl contra los mismos SkillsNT prod (`69447d2f1caf1b2e8cb38c68`)
+y CloudHealth prod (`69798e1fc073d8fe2f86155d`), token de solo lectura.
+
+### Jobs — `type_and_tags`
+- `active_job_queue_job_count`: `COUNTER`, tags `[queue, status]`. Valores de
+  `status` vistos: `processed`, `failed` (SkillsNT 24h: cola `default` con 2
+  `failed` sobre 3065 `processed`). No se vio ningún otro status.
+- `active_job_queue_priority_job_count`: `COUNTER`, tags `[priority, queue,
+  status]` — mismo dato que el anterior pero partido también por prioridad;
+  no se usa (el roadmap pide una fila por cola, no por prioridad).
+- `active_job_queue_time`: `MEASUREMENT`, tag `[queue]` únicamente (sin
+  `status`). Es el tiempo de espera en cola antes de procesarse.
+- `transaction_queue_duration`: `MEASUREMENT`, tags `[hostname, namespace]` o
+  `[namespace]` — **no** es por cola de ActiveJob (es la espera de una
+  request HTTP antes de llegar a la app, namespace `web`/`background`, no
+  `queue`); descartada para esta sección, el roadmap la listaba como
+  candidata pero no aplica aquí.
+
+### Jobs — un solo POST combinado (ventana: última hora)
+`group_by: ["queue"]` con `status` **fijo** (no comodín) en dos selectores
+distintos (uno por `processed`, uno por `failed`) evita el error
+`ungrouped_wildcard` y junta job_count + queue_time en una sola petición
+(mismo truco que la línea de salud de v0.4: selectores con distinto set de
+tags conviven si el `group_by` es compatible con cada uno por separado):
+```json
+{
+  "site_id": "<app id>", "from": "<now-1h>", "to": "<now>", "resolution": "MINUTELY",
+  "select": [
+    {"id":"processed","name":"active_job_queue_job_count","tags":{"queue":"*","status":"processed"},"field":"COUNTER","aggregation":"SUM"},
+    {"id":"failed","name":"active_job_queue_job_count","tags":{"queue":"*","status":"failed"},"field":"COUNTER","aggregation":"SUM"},
+    {"id":"queueTimeMs","name":"active_job_queue_time","tags":{"queue":"*"},"field":"MEAN","aggregation":"AVERAGE"}
+  ],
+  "group_by": [{"Tag":"queue"}], "limit": 100
+}
+```
+Una fila por cola con `processed`, `failed` (ausente = 0, no hubo fallos esa
+hora) y `queueTimeMs` juntos. Verificado 0.56 s contra SkillsNT prod.
+Datos reales (última hora, 2026-09-17 ~19:00 UTC):
+- SkillsNT prod: `default` 51 processed / 64.8 ms wait, `mailers` 15
+  processed / **201,600,360.9 ms** (~56 h) wait — cola de correo con
+  entregas programadas (`deliver_later(wait: …)`), no es un bug del
+  colector ni de la consulta, `solid_queue_recurring` 1 processed / 80 ms.
+- CloudHealth prod: `default` 46 / 70.6 ms, `mailers` 8 / 100.8 ms,
+  `generacion_reporte` 2 / 91.5 ms, `generate_pdf_informe_medico` 1 / 70 ms,
+  `solid_queue_recurring` 1 / 42 ms.
+- Ninguna de las dos tuvo `failed` en la última hora (sí en 24h: SkillsNT
+  `default` 2 failed).
+
+### Check-ins
+Ya vienen en la fase 1 (GraphQL `checkIns.triggers`, ver query abajo); no se
+necesitó investigación de métricas nueva. Confirmado con el overview real
+(2026-09-17): SkillsNT prod y CloudHealth prod traen `checkIns: []` (cero
+check-ins configurados, como dice el roadmap) — el colector ya lo maneja
+bien (`totals.checkInsFailing`), falta pintar la sección en el panel.
+
+### Alerts — esquema GraphQL (`appsignal.com/graphql/docs`, HTML estático
+descargado con curl y buscado con Python/regex, tipos en
+`id="type-<Nombre>"`)
+- `App.alerts: [Alert]` — **sin argumentos** (no hay `state:`/`limit:` en la
+  tabla de campos de `App`; a diferencia de `exceptionIncidents`, que sí los
+  tiene). Se filtra `OPEN`/`WARMUP` del lado del cliente (jq), sin pedir
+  histórico completo porque hoy no hay ningún trigger creado (confirmado:
+  probado contra las 11 apps del tenant, `alerts: []` en todas — 0 triggers,
+  0 alertas, igual que dice el roadmap).
+- `Alert`: `id`, `state: AlertStateEnum!` (`OPEN|CLOSED|WARMUP|COOLDOWN|
+  UNTRACKED|ARCHIVED`), `lastValue: Float!`, `peakValue: Float!`,
+  `openedAt: DateTime`, `createdAt: DateTime`, `message: String`,
+  `trigger: Trigger!`.
+- `Trigger`: `name: String!`, `metricName: String!`, `description`,
+  `thresholdCondition { value, comparisonOperator, humanComparisonOperator }`
+  (umbral y condición sí existen, pero el shape de v0.6 no los pide — se
+  documentan aquí por si una versión futura los quiere).
+- Query probada con curl contra las 11 apps del tenant sin errores
+  (`viewer.organizations.apps.alerts.trigger.{name,metricName}`), 0.73 s.
+- **URL de una alerta:** igual que en v0.5 con host-metrics, no se pudo
+  confirmar la ruta exacta de un trigger (`/sites/<id>/triggers/<id>` o
+  similar) sin sesión interactiva — no hay ningún trigger real para probar
+  el redirect tampoco. Mismo criterio del roadmap: clic derecho/`o` en una
+  fila de alerta abre `app.url`.
+
 ## Jobs (colas de background)
 - Métricas ya listadas para estas apps: `active_job_queue_job_count`,
   `active_job_queue_priority_job_count`, `active_job_queue_time`,

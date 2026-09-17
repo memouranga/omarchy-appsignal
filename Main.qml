@@ -32,6 +32,10 @@ Item {
   property int cpuWarn: Math.min(100, Math.max(1, Number(setting("cpuWarn", 80)) || 80))
   property int memWarn: Math.min(100, Math.max(1, Number(setting("memWarn", 85)) || 85))
   property int diskWarn: Math.min(100, Math.max(1, Number(setting("diskWarn", 85)) || 85))
+  // v0.6: job queue wait-time warn threshold (ms), same pattern as the host
+  // warn thresholds — forwarded to the collector so it can compute
+  // queues[].warn and totals.queuesWarn itself.
+  property int queueTimeWarn: Math.max(1, Number(setting("queueTimeWarn", 30000)) || 30000)
   // "pinned" (default) shows only apps pinned in AppSignal, when at least one
   // exists; "all" always shows every app. No boolean setting type exists in
   // this Omarchy's manifest schema, so this reads as an enum.
@@ -114,7 +118,8 @@ Item {
                              "-limit", String(root.incidentsPerApp),
                              "-cpu-warn", String(root.cpuWarn),
                              "-mem-warn", String(root.memWarn),
-                             "-disk-warn", String(root.diskWarn)]
+                             "-disk-warn", String(root.diskWarn),
+                             "-queue-time-warn", String(root.queueTimeWarn)]
     updateProcess.running = true
   }
 
@@ -183,7 +188,18 @@ Item {
           // warn. The *Pct fields are null on hosts that never publish a memory
           // or swap total (every container host checked), which is why the
           // absolute *UsedMb fields exist — see SPEC.md "v0.5".
-          hosts: Array.isArray(a.hosts) ? a.hosts : []
+          hosts: Array.isArray(a.hosts) ? a.hosts : [],
+          // v0.6: one entry per background queue (ActiveJob), from the same
+          // metrics phase as health/slowActions/hosts — [] outside that
+          // phase or on a failed request. Each entry: name, processed,
+          // failed, queueTimeMs (nullable), warn. Sorted by queueTimeMs desc,
+          // top incidentsPerApp already applied by the collector.
+          queues: Array.isArray(a.queues) ? a.queues : [],
+          // v0.6: open (OPEN/WARMUP) anomaly-detection alerts, straight from
+          // the GraphQL phase — always populated when ready (not gated by
+          // the metrics phase). Each entry: id, state, triggerName, metric,
+          // message, lastValue, peakValue, openedAt, url.
+          alerts: Array.isArray(a.alerts) ? a.alerts : []
         })
       }
     }
@@ -210,15 +226,17 @@ Item {
 
   function attention(app) {
     var t = app.totals || {}
-    return Number(t.monitorsDown || 0) * 100 + Number(t.checkInsFailing || 0) * 50 +
-      Number(t.hostsWarn || 0) * 20 + Number(t.errors || 0) * 2 + Number(t.perf || 0)
+    return Number(t.monitorsDown || 0) * 100 + Number(t.alertsOpen || 0) * 90 +
+      Number(t.checkInsFailing || 0) * 50 + Number(t.hostsWarn || 0) * 20 +
+      Number(t.queuesWarn || 0) * 10 + Number(t.errors || 0) * 2 + Number(t.perf || 0)
   }
 
   // Totals over the visible apps only, so a pinned-down view doesn't have the
   // bar dot or tooltip alarm about apps the panel isn't even showing.
   readonly property var visibleTotals: {
     var list = root.apps
-    var out = { errors: 0, perf: 0, monitors: 0, monitorsDown: 0, checkIns: 0, checkInsFailing: 0, hostsWarn: 0 }
+    var out = { errors: 0, perf: 0, monitors: 0, monitorsDown: 0, checkIns: 0, checkInsFailing: 0,
+                hostsWarn: 0, queuesWarn: 0, alertsOpen: 0 }
     for (var i = 0; i < list.length; i++) {
       var t = list[i].totals || {}
       out.errors += Number(t.errors || 0)
@@ -228,6 +246,8 @@ Item {
       out.checkIns += Number(t.checkIns || 0)
       out.checkInsFailing += Number(t.checkInsFailing || 0)
       out.hostsWarn += Number(t.hostsWarn || 0)
+      out.queuesWarn += Number(t.queuesWarn || 0)
+      out.alertsOpen += Number(t.alertsOpen || 0)
     }
     return out
   }
@@ -237,7 +257,9 @@ Item {
   readonly property int monitorsDown: Number(visibleTotals.monitorsDown || 0)
   readonly property int checkInsFailing: Number(visibleTotals.checkInsFailing || 0)
   readonly property int hostsWarn: Number(visibleTotals.hostsWarn || 0)
-  readonly property bool urgent: monitorsDown > 0 || checkInsFailing > 0
+  readonly property int queuesWarn: Number(visibleTotals.queuesWarn || 0)
+  readonly property int alertsOpen: Number(visibleTotals.alertsOpen || 0)
+  readonly property bool urgent: monitorsDown > 0 || checkInsFailing > 0 || alertsOpen > 0
   readonly property bool attentionNeeded: urgent || openErrors > 0 || hostsWarn > 0
 
   // ------------------------------------------------------- app selection

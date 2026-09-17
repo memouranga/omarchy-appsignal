@@ -23,6 +23,7 @@ metrics_timeout=20
 cpu_warn=80
 mem_warn=85
 disk_warn=85
+queue_time_warn=30000
 
 usage() {
   cat <<'USAGE'
@@ -34,6 +35,7 @@ Usage: appsignal-collect [options]
   -cpu-warn PCT           Host CPU % warn threshold (default: 80)
   -mem-warn PCT           Host memory % warn threshold (default: 85)
   -disk-warn PCT          Host disk % warn threshold (default: 85)
+  -queue-time-warn MS     Job queue wait time warn threshold, ms (default: 30000)
 USAGE
 }
 
@@ -46,6 +48,7 @@ while (($#)); do
     -cpu-warn|--cpu-warn) cpu_warn=$2; shift 2 ;;
     -mem-warn|--mem-warn) mem_warn=$2; shift 2 ;;
     -disk-warn|--disk-warn) disk_warn=$2; shift 2 ;;
+    -queue-time-warn|--queue-time-warn) queue_time_warn=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "appsignal-collect: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -56,6 +59,7 @@ done
 [[ $cpu_warn =~ ^[0-9]+$ ]] || cpu_warn=80
 [[ $mem_warn =~ ^[0-9]+$ ]] || mem_warn=85
 [[ $disk_warn =~ ^[0-9]+$ ]] || disk_warn=85
+[[ $queue_time_warn =~ ^[0-9]+$ ]] || queue_time_warn=30000
 
 for tool in curl jq; do
   command -v "$tool" >/dev/null 2>&1 || { echo "appsignal-collect: $tool is required" >&2; exit 1; }
@@ -162,6 +166,18 @@ query OmarchyOverview($limit: Int!) {
             lastErrorAt
             lastSuccessAt
             lastUpdateAt
+          }
+        }
+        alerts {
+          id
+          state
+          openedAt
+          lastValue
+          peakValue
+          message
+          trigger {
+            name
+            metricName
           }
         }
         deployMarkers(limit: 1) {
@@ -327,6 +343,27 @@ jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
                         url: "\($base)/check-ins/\(.id)"
                       }
                   ],
+                  # v0.6: only OPEN/WARMUP triggers (the alerts actually
+                  # demanding attention). App.alerts takes no state/limit
+                  # argument (unlike exceptionIncidents), so the filter has
+                  # to happen here; harmless today since every app on this
+                  # tenant has 0 triggers. No confirmed per-trigger URL
+                  # exists without an interactive login (same situation as
+                  # host-metrics in v0.5), so it opens app.url like a host row.
+                  alerts: [
+                    (.alerts // [])[]
+                    | select(.state == "OPEN" or .state == "WARMUP")
+                    | {
+                        id, state: (.state // ""),
+                        triggerName: ((.trigger.name) // ""),
+                        metric: ((.trigger.metricName) // ""),
+                        message: (.message // ""),
+                        lastValue: (.lastValue // 0),
+                        peakValue: (.peakValue // 0),
+                        openedAt: (.openedAt // ""),
+                        url: $base
+                      }
+                  ],
                   lastDeploy: (
                     ((.deployMarkers // []) | first) as $d
                     | if $d == null then null else {
@@ -346,7 +383,8 @@ jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
                   monitors: (.monitors | length),
                   monitorsDown: ([.monitors[] | select(.down)] | length),
                   checkIns: (.checkIns | length),
-                  checkInsFailing: ([.checkIns[] | select(.failing)] | length)
+                  checkInsFailing: ([.checkIns[] | select(.failing)] | length),
+                  alertsOpen: (.alerts | length)
                 }
             ]
           }
@@ -361,7 +399,8 @@ jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
           monitors: (map(.monitors) | add // 0),
           monitorsDown: (map(.monitorsDown) | add // 0),
           checkIns: (map(.checkIns) | add // 0),
-          checkInsFailing: (map(.checkInsFailing) | add // 0)
+          checkInsFailing: (map(.checkInsFailing) | add // 0),
+          alertsOpen: (map(.alertsOpen) | add // 0)
         }
     )
 ' "$tmp/resp.json" > "$tmp/phase1.json"
@@ -390,7 +429,7 @@ else
 fi
 
 fetch_phase2_app() {
-  local app_id=$1 health_out=$2 slow_out=$3 hosts_out=$4
+  local app_id=$1 health_out=$2 slow_out=$3 hosts_out=$4 jobs_out=$5
   local from1 to1 from24 to24 from15 to15 health_body slow_body hc sc
 
   to1=$(now_utc)
@@ -556,11 +595,49 @@ fetch_phase2_app() {
   else
     echo '[]' > "$hosts_out"
   fi
+
+  # ------------------------------------------------------------- v0.6: jobs
+  #
+  # One POST for every background queue (ActiveJob): job_count split into two
+  # selectors with a *fixed* (non-wildcard) "status" tag each — "processed"
+  # and "failed" — plus queue_time's mean wait, all grouped by "queue" alone.
+  # A fixed tag on a selector does not need to appear in group_by (only a "*"
+  # wildcard does), so this single request works even though
+  # active_job_queue_time has no "status" tag at all. See SPEC.md "v0.6" for
+  # the verification against real data (SkillsNT/CloudHealth prod).
+  local jobs_body jc
+
+  jobs_body=$(jq -n --arg site "$app_id" --arg from "$from1" --arg to "$to1" '
+    {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
+     select:[
+       {id:"processed", name:"active_job_queue_job_count", tags:{queue:"*", status:"processed"}, field:"COUNTER", aggregation:"SUM"},
+       {id:"failed", name:"active_job_queue_job_count", tags:{queue:"*", status:"failed"}, field:"COUNTER", aggregation:"SUM"},
+       {id:"queueTimeMs", name:"active_job_queue_time", tags:{queue:"*"}, field:"MEAN", aggregation:"AVERAGE"}
+     ],
+     group_by:[{Tag:"queue"}], limit:100}')
+
+  jc=$(curl -sS --max-time "$metrics_timeout" \
+    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+    -X POST "$METRICS_ENDPOINT" -d "$jobs_body" -o "$jobs_out.raw" -w '%{http_code}' 2>/dev/null) || jc=000
+
+  if [[ $jc == 200 ]] && jq -e '.rows and (.error | not)' "$jobs_out.raw" >/dev/null 2>&1; then
+    jq --argjson limit "$limit" --argjson queueTimeWarn "$queue_time_warn" '
+      [ (.rows // [])[]
+        | { name: (.group.queue // ""),
+            processed: (.data.processed // 0),
+            failed: (.data.failed // 0),
+            queueTimeMs: (.data.queueTimeMs // null) }
+        | . + { warn: (.queueTimeMs != null and .queueTimeMs >= $queueTimeWarn) }
+      ] | sort_by(-(.queueTimeMs // 0)) | .[0:$limit]
+    ' "$jobs_out.raw" > "$jobs_out" 2>/dev/null || echo '[]' > "$jobs_out"
+  else
+    echo '[]' > "$jobs_out"
+  fi
 }
 
 if ((${#phase2_ids[@]} > 0)); then
   for app_id in "${phase2_ids[@]}"; do
-    fetch_phase2_app "$app_id" "$tmp/health_$app_id.json" "$tmp/slow_$app_id.json" "$tmp/hosts_$app_id.json" &
+    fetch_phase2_app "$app_id" "$tmp/health_$app_id.json" "$tmp/slow_$app_id.json" "$tmp/hosts_$app_id.json" "$tmp/jobs_$app_id.json" &
   done
   wait
 fi
@@ -572,14 +649,16 @@ fi
       --slurpfile h <(cat "$tmp/health_$app_id.json" 2>/dev/null || echo null) \
       --slurpfile s <(cat "$tmp/slow_$app_id.json" 2>/dev/null || echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}') \
       --slurpfile hosts <(cat "$tmp/hosts_$app_id.json" 2>/dev/null || echo '[]') \
+      --slurpfile jobs <(cat "$tmp/jobs_$app_id.json" 2>/dev/null || echo '[]') \
       '{($id): {health: ($h[0] // null), slowWeb: ($s[0].slowWeb // []),
                 slowBackground: ($s[0].slowBackground // []), slowActions: ($s[0].slowActions // []),
-                hosts: ($hosts[0] // [])}}'
+                hosts: ($hosts[0] // []), queues: ($jobs[0] // [])}}'
   done
 } | jq -s 'add' > "$tmp/phase2.json"
 
-# v0.5: merge hosts, then recompute totals.hostsWarn (per app and global) now
-# that hosts exist — phase1's .totals was built before this data landed.
+# v0.5/v0.6: merge hosts and queues, then recompute totals.hostsWarn and
+# totals.queuesWarn (per app and global) now that this data exists —
+# phase1's .totals was built before it landed.
 jq --slurpfile p2 "$tmp/phase2.json" '
   ($p2[0] // {}) as $p2
   | .organizations = [
@@ -590,9 +669,12 @@ jq --slurpfile p2 "$tmp/phase2.json" '
                   slowWeb: ($p2[.id].slowWeb // []),
                   slowBackground: ($p2[.id].slowBackground // []),
                   slowActions: ($p2[.id].slowActions // []),
-                  hosts: ($p2[.id].hosts // []) }
+                  hosts: ($p2[.id].hosts // []),
+                  queues: ($p2[.id].queues // []) }
           | .totals.hostsWarn = ([.hosts[] | select(.warn == true)] | length)
+          | .totals.queuesWarn = ([.queues[] | select(.warn == true)] | length)
         ]
     ]
   | .totals.hostsWarn = ([.organizations[].apps[].totals.hostsWarn] | add // 0)
+  | .totals.queuesWarn = ([.organizations[].apps[].totals.queuesWarn] | add // 0)
 ' "$tmp/phase1.json" | write_out
