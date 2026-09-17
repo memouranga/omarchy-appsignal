@@ -676,8 +676,8 @@ fetch_phase2_app() {
       --argjson cpuWarn "$cpu_warn" --argjson memWarn "$mem_warn" --argjson diskWarn "$disk_warn" '
       # Strip a trailing "-<container id>" from a hostname when what is left
       # looks like an IP or a legible name (both real hosts are
-      # "<ip>-<container id>"): "178.156.134.200-94c077fa010a" ->
-      # "178.156.134.200".
+      # "<ip>-<container id>"): "10.0.0.1-abc123def456" ->
+      # "10.0.0.1".
       def shortName:
         . as $h
         | if ($h | test("^.+-[^-]+$")) then
@@ -743,7 +743,7 @@ fetch_phase2_app() {
   # Why MEAN aggregated with MIN and not with AVERAGE (v0.6 fix): a mean over
   # the whole window mixes jobs that wanted to run *now* with jobs that were
   # deliberately scheduled for later (deliver_later(wait:)), and one weekly
-  # mail turns the number into days. Real numbers, SkillsNT prod `mailers`,
+  # mail turns the number into days. Real numbers from a production `mailers` queue,
   # same hour: MEAN/AVERAGE 209,828,950 ms (58 h) vs MEAN/MIN 41 ms — the
   # second is the latency a job actually pays when it is ready to run. P50
   # would have been the textbook answer but AppSignal does not store it for

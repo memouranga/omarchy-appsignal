@@ -659,7 +659,7 @@ Panel {
 
   // AppSignal's error_rate gauge is already expressed in percent, not as a
   // 0-1 fraction: namespaces that fail on every transaction ("unhandled",
-  // "rake", "runner") report exactly 100.0, and SkillsNT prod's 0.07 over 24h
+  // "rake", "runner") report exactly 100.0, and a production app's 0.07 over 24h
   // lines up with its 44 HTTP 500s out of ~78k requests (0.06%), not with 7%.
   // So the value is printed as-is, with enough decimals that a real-world
   // rate below 1% does not collapse into "0.0%".
@@ -2047,7 +2047,7 @@ Panel {
         "<font color=\"" + hostRow.metricColor(diskOver) + "\">DISK " + hostRow.pctText(h.diskPct) + "</font>"
       ]
       // Swap only shows up when the host is actually swapping: a host with no
-      // swap in use (CloudHealth) would only add noise. Swapping never raises
+      // swap in use would only add noise. Swapping never raises
       // `warn` on its own, so this stays dim.
       var swapText = root.hostSwapText(h)
       if (swapText !== "")
