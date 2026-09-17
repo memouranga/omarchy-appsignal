@@ -548,6 +548,120 @@ Datos reales (última hora, 2026-09-17 ~19:00 UTC):
 - Ninguna de las dos tuvo `failed` en la última hora (sí en 24h: SkillsNT
   `default` 2 failed).
 
+### Jobs — el falso positivo de `mailers` y cómo se resolvió (2026-09-17, Opus)
+
+El MEAN de `active_job_queue_time` incluye los jobs que alguien programó a
+propósito (`deliver_later(wait: 1.week)`), así que la cola `mailers` de
+SkillsNT salía permanentemente en rojo con ~58 h de espera. Un rojo que nunca
+se apaga no es señal, es ruido: había que elegir otra métrica.
+
+**Qué campos existen de verdad.** La propuesta base era P50, pero AppSignal
+**no guarda P50 para esta métrica**: `{"error":"Invalid field: 'p_50' for
+metric: 'active_job_queue_time'"}`. Probando uno por uno, los únicos campos
+válidos son `MEAN`, `COUNT`, `P90` y `P95` (`MIN`, `MAX`, `P99` y todos los
+demás percentiles se rechazan). Las agregaciones sí son las seis completas:
+`SUM`, `AVERAGE`, `MIN`, `MAX`, `FIRST`, `LAST`.
+
+**Distribución real** (2026-09-17 ~19:35 UTC; `field`/`aggregation`, ms):
+
+| app · cola | ventana | MEAN/AVG | MEAN/MIN | MEAN/MAX | P90/AVG | P90/MIN | P95/AVG | COUNT |
+|---|---|---|---|---|---|---|---|---|
+| SkillsNT `mailers` | 1 h | **209,828,951** | **41.0** | 604,800,766 | 209,828,951 | 41.2 | 209,828,951 | 14 |
+| SkillsNT `default` | 1 h | 62.6 | 18.5 | 107.3 | 74.4 | 18.9 | 74.4 | 48 |
+| SkillsNT `solid_queue_recurring` | 1 h | 58.0 | 58.0 | 58.0 | 58.5 | 58.5 | 58.5 | 1 |
+| SkillsNT `mailers` | 24 h | 121,199,511 | 14,400,121 | 304,457,536 | 126,047,521 | 14,400,121 | 126,047,521 | 212 |
+| SkillsNT `default` | 24 h | 2,780 | 59.8 | 37,148 | 3,769 | 73.1 | 3,855 | 3,086 |
+| CloudHealth `default` | 1 h | 58.5 | 12.0 | 109.0 | 66.6 | 12.2 | 66.7 | 43 |
+| CloudHealth `mailers` | 1 h | 55.1 | 15.5 | 94.6 | 70.1 | 18.3 | 70.1 | 7 |
+| CloudHealth `default` | 24 h | 92.0 | 47.0 | 344.6 | 208.3 | 47.9 | 208.4 | 274 |
+| CloudHealth `mailers` | 24 h | 62.6 | 15.5 | 99.3 | 67.9 | 18.3 | 67.9 | 41 |
+
+Lo que dicen los números:
+
+1. **P90 y P95 no sirven para filtrar.** Se calculan *dentro* de cada bucket
+   y luego se promedian, así que arrastran la misma contaminación: el P95 de
+   `mailers` (209,828,951 ms) es indistinguible de su MEAN. Aunque P50
+   existiera, sería lo mismo.
+2. **El eje útil es la agregación entre buckets, no el percentil.**
+   `MEAN` con `aggregation:"MIN"` = el bucket de un minuto con la espera media
+   más baja de la ventana. Para `mailers` da **41 ms** frente a 209,828,950 ms
+   del MEAN/AVERAGE: 5.1 millones de veces menos, y 41 ms es exactamente lo
+   que tarda en arrancar un mail que sí quería salir ya.
+3. **No confunde una cola realmente atorada.** Un atasco que dure más que la
+   ventana levanta *todos* los buckets, incluido el mínimo. Se ve en SkillsNT
+   `default` a 24 h: MEAN/MIN sube a 59.8 ms y MEAN/MAX a 37,148 ms.
+   CloudHealth, sin jobs programados, tiene MEAN/AVG entre 1.2× y 5× su
+   MEAN/MIN en todas sus colas: ningún falso positivo nuevo.
+4. Un pico de 5 minutos dentro de la hora no enciende el warn. Para una
+   barra es lo correcto: lo que importa es lo sostenido.
+
+**Decisión.**
+
+- `queueTimeMs` = `active_job_queue_time`, `field:"MEAN"`,
+  `aggregation:"MIN"` — "lo que espera un job que quiere correr ya". Es lo que
+  muestra la fila y lo que compara contra `queueTimeWarn`.
+- `queueTimeHighMs` = `field:"P95"`, `aggregation:"AVERAGE"` — la vista
+  contraria, contaminada a propósito. No se pinta; va en el JSON y en el
+  prompt del agente, que así ve las dos caras.
+- `scheduled: true` cuando **hasta el piso** supera 1 h (`SCHEDULED_FLOOR_MS`
+  = 3,600,000): en esa ventana no hay un solo job esperando correr, es una
+  agenda. La fila imprime `scheduled` en dim en vez de la espera y **no**
+  aplica `warn`. Con datos reales de la última hora `mailers` no cae aquí
+  (piso 41 ms), pero a 24 h sí (piso 14,400,121 ms ≈ 4 h): a las 3 AM, cuando
+  en la ventana solo queden mails programados, la fila dirá `scheduled` en
+  vez de "168 h" en rojo.
+- `warn` = `failed > 0` **o** (`!scheduled` y `queueTimeMs >= queueTimeWarn`).
+  `failed` siempre se pinta en urgent.
+- **Orden de las colas:** las que avisan primero, las `scheduled` al final, el
+  resto por throughput (`processed` desc). Ordenar las colas sanas por espera
+  —lo que hacía la primera versión de v0.6— las ordena por ruido ahora que
+  todas están en decenas de ms, y sacaba a `default` (la cola principal, 43
+  jobs/h en CloudHealth) del top N por detrás de colas de 1 job/h.
+- Setting `ignoreQueues` (string, lista separada por comas, default `""`): el
+  colector descarta esas colas antes de ordenar y cortar.
+
+**Ojo con los selectores duplicados.** La API tira silenciosamente los
+selectores repetidos sobre el mismo `name`+`field`: gana el último, sin error.
+Pedir MEAN/AVERAGE y MEAN/MIN en el mismo POST devuelve solo uno. Por eso las
+cuatro medidas de la consulta usan `field` distinto (`COUNTER` ×2 con `status`
+fijo, `MEAN`, `P95`) y todo sigue cabiendo en **un solo POST de 0.56 s**.
+
+### `queuesWarn` enciende el punto y `attentionNeeded`
+
+Hasta v0.6 `totals.queuesWarn` se calculaba pero no encendía nada: era la
+única señal muda del plugin, justamente porque su warn era un falso positivo
+permanente. Sin el falso positivo ya no hay razón para tratarla distinto:
+`queuesWarn` entra en `attentionNeeded`, en el punto del tab de la app
+(`appHasAlert`) y en el tooltip del icono ("2 queues backed up"), **igual que
+`hostsWarn`**. Enciende tanto por `failed > 0` como por espera real sobre
+umbral: las dos cosas son trabajo que no se está haciendo, y ninguna de las
+dos se dispara sola.
+
+### Robustez: un fallo en `alerts` no puede tumbar el overview completo
+
+Riesgo real: `checkIns` y `alerts` son lo más nuevo del esquema y lo menos
+esencial (hoy vacío en las 11 apps del tenant), pero GraphQL rechaza el
+**documento entero** si un campo cambia de nombre. Un rename de AppSignal
+dejaría el plugin sin errores, sin performance, sin uptime y sin deploys.
+
+Arreglo: esos dos bloques llevan el marcador `#opt` (comentario GraphQL,
+inerte) al final de cada línea. Si la respuesta trae `errors`, el colector
+reintenta **una vez** con `grep -v '#opt'` y marca `.error` con
+"Check-ins and alerts unavailable (AppSignal schema changed)".
+
+Verificado en una copia del script en el scratchpad:
+
+- Renombrando `peakValue` → `peakValueZZZ` (campo opcional): la primera
+  petición devuelve **HTTP 400** con `errors` —no 200, por eso el reintento
+  también acepta 400/422—, el reintento sale 200 y el overview queda
+  `ready:true` con los 36 errores, 8 colas y el deploy intactos, `alerts:0`,
+  `checkIns:0` y el mensaje de degradado.
+- Renombrando `exceptionName` (campo no opcional): reintenta, vuelve a
+  fallar y termina en `emit_stale` con el mensaje de GraphQL. Correcto: eso
+  sí es un overview que no sirve.
+
+401/403 nunca se reintenta (es un problema de token, no de esquema).
+
 ### Check-ins
 Ya vienen en la fase 1 (GraphQL `checkIns.triggers`, ver query abajo); no se
 necesitó investigación de métricas nueva. Confirmado con el overview real
@@ -585,11 +699,14 @@ descargado con curl y buscado con Python/regex, tipos en
   `active_job_queue_priority_job_count`, `active_job_queue_time`,
   `transaction_queue_duration`. Investigar con `type_and_tags` sus tags
   (¿`queue`? ¿`status`/`state`? ¿adapter?) y unidades. Ventana: última hora.
-- Shape por app: `queues: [{name, processed, failed, queueTimeMs, warn}]`
-  (adaptar a lo que la API dé de verdad; si `failed` no existe, omitir).
-  Orden: por `queueTimeMs` desc. Top N = incidentsPerApp.
+- Shape por app: `queues: [{name, processed, failed, queueTimeMs,
+  queueTimeHighMs, scheduled, warn}]`. Orden y semántica finales: ver
+  "el falso positivo de `mailers`" arriba. Top N = incidentsPerApp.
 - Setting `queueTimeWarn` (integer, ms, default 30000): `warn` si
-  `queueTimeMs` lo supera. `totals.queuesWarn` por app y global.
+  `queueTimeMs` lo supera y la cola no es `scheduled`, o si `failed > 0`.
+  `totals.queuesWarn` por app y global, y enciende el punto igual que
+  `hostsWarn`.
+- Setting `ignoreQueues` (string, default `""`): colas excluidas.
 - Panel: sección JOBS (después de UPTIME). Fila: glyph (mdi-tray-full o
   similar, verificar con od), nombre de la cola, a la derecha
   "1.2k jobs/h · 340 ms wait" (y "· 3 failed" en urgent si aplica).
