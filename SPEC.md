@@ -316,3 +316,60 @@ colector.
 "health": { "throughput": 2693, "errorRate": 0.0, "meanMs": 4.55, "window": "1h" } | null,
 "slowActions": [ { "action": "WelcomeController#home", "namespace": "web", "meanMs": 4.78, "count": 12 } ]
 ```
+
+---
+
+# v0.4.1 — Ranking de acciones lentas por impacto
+
+Decisión de Fable el 2026-09-17, basada en la evaluación de Opus con datos reales
+(SkillsNT: 4 de las 5 "más lentas" corrían 1×/día; CloudHealth:
+`PatientDashboardController#index` 2099 ms × 1042 = 2188 s/día no aparecía).
+
+- El colector calcula por acción `totalMs = meanMs × count` y entrega DOS listas
+  por app: `slowWeb` (namespace `web`) y `slowBackground` (todo lo demás), cada
+  una ordenada por `totalMs` desc, top N = `ceil(incidentsPerApp / 2)` + 1 (con
+  el default 5 → 3 filas por grupo). Pedir a la API `limit` suficiente (≥200)
+  para que el orden por impacto sea real y no sobre un top-100 por media.
+- `slowActions` se conserva como concatenación (compatibilidad) pero el panel
+  usa las dos listas.
+- Panel: bajo PERFORMANCE, dos subgrupos con subtítulo dim: "WEB · 24H" y
+  "BACKGROUND · 24H" (se oculta el vacío). Fila: acción, y a la derecha
+  "2099 ms · 1042× · 36 min/day" (total humanizado: s, min, h por día).
+- Prompt del agente: corregir plural ("over 1 request" / "over N requests") y
+  añadir el total diario.
+
+# v0.5 — Servers
+
+- Colector, fase 2, por app candidata, un POST más a `metrics/list` (ventana
+  últimos 15 min, `resolution: MINUTELY`, `group_by: [{"Tag":"hostname"}]`):
+  `load_avg` (GAUGE/AVERAGE, tags {hostname:"*"}), `cpu`, `memory`,
+  `disk_usage`, `swap`. OJO: `cpu` y `memory` llevan tag `state`
+  (type_and_tags verificado: cpu → [state, hostname, role, platform, region];
+  disk_usage → [mountpoint, hostname, …]). Sonnet DEBE investigar primero con
+  curl qué valores toma `state` (p. ej. user/system/idle/…; used/available/…),
+  en qué unidad viene cada métrica (¿% o bytes?), y derivar:
+  `cpuPct` (no-idle), `memPct` (usada/total), `load1`, `diskPct` + `diskMount`
+  (el punto de montaje más lleno), `swapPct` (o null). Documentar las consultas
+  exactas en esta sección, con números reales de los hosts
+  178.156.134.200-94c077fa010a (SkillsNT) y 87.99.136.94-c511a0f51603 (CloudHealth).
+- Shape por app: `hosts: [{hostname, shortName, cpuPct, memPct, load1, diskPct,
+  diskMount, swapPct, warn: bool}]`. `shortName` = hostname sin el sufijo
+  `-<container id>` si el prefijo es una IP o nombre legible. `warn` si supera
+  umbrales. Fallo de la consulta → `hosts: []`, overview sigue ready.
+- Settings nuevos (integer): `cpuWarn` 80, `memWarn` 85, `diskWarn` 85.
+- `totals.hostsWarn` por app y global; `attentionNeeded` también se enciende si
+  `hostsWarn > 0` en apps visibles. El punto del tab de la app también.
+- Panel: sección SERVERS (entre PERFORMANCE y UPTIME). Una fila por host:
+  glyph de servidor (mdi-server U+F048B; verificar con od que no quede vacío),
+  shortName, y a la derecha "CPU 3% · MEM 41% · LOAD 0.04 · DISK 62%"; cada
+  métrica sobre umbral en color urgent. Segunda línea dim: hostname completo.
+  Entra al cursor (`kind: "host"`).
+- Acción: Enter/clic izq = agente (respeta `incidentAction`) con prompt:
+  "Analyze host <hostname> of app <app> (<env>) in AppSignal: CPU <x>%, memory
+  <y>%, load <z>, disk <w>% on <mount>. Use the AppSignal MCP to read host
+  metrics over the last 24h and 7d, correlate with throughput, slow actions and
+  background jobs, and propose concrete optimizations (right-sizing, memory,
+  swap, disk cleanup, process counts). Do not change anything unless I ask."
+  Clic derecho/`o` = navegador a `<app.url>/host-metrics` (verificar la ruta
+  real en appsignal.com; si no se puede confirmar, usar app.url).
+- manifest version 0.5.0. README actualizado.
