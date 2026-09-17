@@ -440,29 +440,53 @@ app.url"), clic derecho/`o` en una fila de host abre `app.url`.
   redondeado si `memTotal > 0`, si no `null`; `load1` = `load_avg` tal cual;
   `diskPct`/`diskMount` = el mountpoint con mayor `disk_usage`; `swapPct` =
   `swapUsed/swapTotal*100` si `swapTotal > 0`, si no `null`.
-- Shape por app: `hosts: [{hostname, shortName, cpuPct, memPct, load1, diskPct,
-  diskMount, swapPct, warn: bool}]`. `shortName` = hostname sin el sufijo
+- **Memoria absoluta** (corrección tras probar con datos reales): como ningún
+  host real publica `memory state=total`, `memPct`/`swapPct` salían siempre
+  `null` y la fila se quedaba sin memoria. El colector entrega además
+  `memUsedMb` y `swapUsedMb` (el `used` de la API, en MB, número o `null`), que
+  es el único dato de memoria real que hay en estos hosts. El panel prefiere el
+  porcentaje y cae al absoluto: `MEM 41%` si hay `memPct`, si no
+  `MEM 1.1 GB` (`<1024 MB` → `"512 MB"`; si no, GB con un decimal); `n/a` solo
+  si faltan los dos. `SWAP` solo aparece cuando el host está usando swap
+  (`swapUsedMb > 0` o `swapPct > 0`) y **nunca** enciende `warn` por sí solo:
+  `memWarn` sigue aplicando únicamente a `memPct` (un absoluto sin total no es
+  comparable contra un umbral porcentual).
+- Shape por app: `hosts: [{hostname, shortName, cpuPct, memPct, memUsedMb,
+  load1, diskPct, diskMount, swapPct, swapUsedMb, warn: bool}]`. `shortName` = hostname sin el sufijo
   `-<container id>` cuando el prefijo antes del último `-` parece una IP o un
   nombre legible (con los dos hosts reales: `178.156.134.200-94c077fa010a` →
   `178.156.134.200`; `87.99.136.94-c511a0f51603` → `87.99.136.94`). `warn` =
   `cpuPct >= cpuWarn || diskPct >= diskWarn || (memPct != null && memPct >=
   memWarn)`. Fallo de la consulta → `hosts: []`, overview sigue ready.
 - Settings nuevos (integer): `cpuWarn` 80, `memWarn` 85, `diskWarn` 85.
+- Temporales del colector: el shell lo lanza como hijo y lo mata con SIGKILL al
+  reiniciar (`omarchy restart shell`), así que el `trap ... EXIT` no alcanza a
+  correr y quedaba un `/tmp/tmp.XXXX` con la respuesta de la API dentro
+  (encontrados dos en la prueba del 2026-09-17). El scratch pasa a
+  `$XDG_RUNTIME_DIR/appsignal-collect.XXXXXX` (tmpfs, se borra al cerrar
+  sesión), con nombre propio, y cada corrida barre los `appsignal-collect.*` de
+  más de 60 min antes de empezar; el trap cubre además INT/TERM/HUP.
 - `totals.hostsWarn` por app y global (cuenta de hosts con `warn: true`);
   `attentionNeeded` también se enciende si `hostsWarn > 0` en apps visibles.
   El punto del tab de la app también.
-- Panel: sección SERVERS (entre PERFORMANCE y UPTIME). Una fila por host:
-  glyph de servidor (mdi-server U+F048B; verificar con od que no quede vacío),
-  shortName, y a la derecha "CPU 3% · MEM n/a · LOAD 0.02 · DISK 37%" (cuando
-  `memPct`/`swapPct` son `null` se imprime "n/a", nunca "NaN%" ni se omite la
-  métrica); cada valor sobre umbral en color urgent. Segunda línea dim:
-  hostname completo. Entra al cursor (`kind: "host"`).
+- Panel: sección SERVERS (entre PERFORMANCE y UPTIME). Una fila por host en
+  **dos líneas apiladas** (probado el 2026-09-17: con la línea de métricas a la
+  derecha, el hostname quedaba elidido a "178.1…" — las métricas no caben al
+  lado del nombre en el ancho del panel):
+  1. glyph de servidor (mdi-server U+F048B; verificar con od que no quede
+     vacío) + hostname completo, con el `shortName` en color normal y la cola
+     `-<container id>` en dim (así el nombre completo se ve una sola vez).
+  2. métricas, alineadas bajo el nombre: "CPU 4%  ·  MEM 1.1 GB  ·  LOAD 0.02
+     ·  DISK 37%  ·  SWAP 512 MB". Cada valor sobre umbral en color urgent;
+     LOAD y SWAP siempre dim; "n/a" cuando no hay dato, nunca "NaN%".
+  Entra al cursor (`kind: "host"`).
 - Acción: Enter/clic izq = agente (respeta `incidentAction`) con prompt:
   "Analyze host <hostname> of app <app> (<env>) in AppSignal: CPU <x>%, memory
   <y>%, load <z>, disk <w>% on <mount>. Use the AppSignal MCP to read host
   metrics over the last 24h and 7d, correlate with throughput, slow actions and
   background jobs, and propose concrete optimizations (right-sizing, memory,
   swap, disk cleanup, process counts). Do not change anything unless I ask."
-  Cuando `memPct`/`swapPct` son `null`, esas cláusulas se omiten del prompt en
-  vez de decir "null%". Clic derecho/`o` = navegador a `app.url` (ver arriba).
+  Cuando no hay porcentaje de memoria se manda el absoluto ("memory 1.1 GB
+  used") y, si el host está usando swap, "swap 512 MB in use"; una cláusula sin
+  ningún dato se omite en vez de decir "null%". Clic derecho/`o` = navegador a `app.url` (ver arriba).
 - manifest version 0.5.0. README actualizado.

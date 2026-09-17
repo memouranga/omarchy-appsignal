@@ -178,7 +178,11 @@ Item {
           slowActions: Array.isArray(a.slowActions) ? a.slowActions : [],
           // v0.5: one entry per host reporting metrics for this app; [] when
           // the app was outside the collector's metrics phase or that host
-          // query failed for it.
+          // query failed for it. Each entry: hostname, shortName, cpuPct,
+          // memPct, memUsedMb, load1, diskPct, diskMount, swapPct, swapUsedMb,
+          // warn. The *Pct fields are null on hosts that never publish a memory
+          // or swap total (every container host checked), which is why the
+          // absolute *UsedMb fields exist — see SPEC.md "v0.5".
           hosts: Array.isArray(a.hosts) ? a.hosts : []
         })
       }

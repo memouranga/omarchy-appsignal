@@ -31,7 +31,7 @@
 - **Open errors.** The latest open exception incidents for the selected app: exception class, action, occurrence count and age. Click one and it opens in AppSignal.
 - **Health at a glance.** A line under the app header with the last hour's throughput, error rate and mean response time — shown for pinned apps (the ones the collector fetches metrics for); omitted when there is nothing to show.
 - **Performance.** Open performance incidents when AppSignal has any (rare, it auto-closes them); otherwise the 24h slowest actions **ranked by impact** (mean duration × request count), split into WEB and BACKGROUND, each row showing mean, request count and the humanized daily total (e.g. "36 min/day").
-- **Servers.** One row per host reporting metrics for the app: CPU, memory, load average and the fullest disk, with each figure turning urgent-colored past its warn threshold.
+- **Servers.** One row per host reporting metrics for the app: CPU, memory, load average, the fullest disk, and swap when the host is actually swapping — each figure turning urgent-colored past its warn threshold. Memory shows a percentage when the host publishes a memory total, and the absolute figure ("MEM 1.1 GB") when it does not, which is the usual case on container hosts.
 - **Uptime monitors.** Each monitor with its up/down state and, when down, since when. Click to open it.
 - **Last deploy.** A line at the foot of the app with the revision, who deployed it, how long it has been live, and errors since — when AppSignal has a real deploy marker for that app.
 - **Keyboard first.** `j`/`k` walk the rows, `h`/`l` (or `←`/`→`) switch apps, `1`-`9` jump to an app, `Enter` opens, `r` refreshes, `g`/`G` jump, `Esc` closes.
@@ -122,7 +122,7 @@ Set them on the widget entry in `~/.config/omarchy/shell.json`:
 | `incidentAction` | `agent` | What `Enter`/left click do on an error, performance or server row: `agent` or `browser` |
 | `onlyPinned` | `pinned` | `pinned` shows only the apps you pinned in AppSignal (if you've pinned any); `all` always shows every app |
 | `cpuWarn` | `80` | Host CPU % at or above which a server row's CPU figure (and its warn dot) turns urgent |
-| `memWarn` | `85` | Same, for host memory % (only when AppSignal reports a usable total — see `SPEC.md` "v0.5") |
+| `memWarn` | `85` | Same, for host memory % — only applies when AppSignal reports a usable memory total for the host; a host that only reports megabytes used shows them, and never warns on them (see `SPEC.md` "v0.5") |
 | `diskWarn` | `85` | Same, for the fullest disk mountpoint's % |
 
 ### Pinning apps in AppSignal
@@ -187,7 +187,7 @@ Second, for apps pinned in AppSignal only (or, with nothing pinned, the first 6 
 request count bounded), four read-only requests to the
 [metrics API](https://docs.appsignal.com/api/v2/metrics.md) fetch: the last hour's health (throughput,
 error rate, mean duration); the 24h slowest actions, ranked by impact (mean × count) and split into
-web/background; and the last 15 minutes of host metrics (CPU, memory, load, disk — two requests,
+web/background; and the last 15 minutes of host metrics (CPU, memory, swap, load, disk — two requests,
 since CPU/memory/swap and disk usage need different tag groupings). This phase runs in parallel per
 app with its own timeout; if any of these fail for an app, that app's health line, performance section
 or servers section is simply empty — the rest of the overview is unaffected. The exact queries, and how

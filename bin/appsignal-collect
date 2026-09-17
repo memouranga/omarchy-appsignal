@@ -181,8 +181,17 @@ GQL
 
 body=$(jq -n --arg q "$QUERY" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}')
 
-tmp=$(mktemp -d) || exit 1
-trap 'rm -rf "$tmp"' EXIT
+# Scratch dir. It lives under $XDG_RUNTIME_DIR (tmpfs, wiped at logout) rather
+# than /tmp, and carries our own name, because the shell starts this collector
+# as a child process and SIGKILLs it on `omarchy restart shell`: no trap can run
+# then, so a run cut short leaves its directory behind. Named dirs let the next
+# run sweep what an hour-old one left; the runtime dir keeps even that bounded.
+tmp_base=${XDG_RUNTIME_DIR:-/tmp}
+[[ -d $tmp_base && -w $tmp_base ]] || tmp_base=/tmp
+find "$tmp_base" -maxdepth 1 -type d -name 'appsignal-collect.*' -mmin +60 \
+  -exec rm -rf {} + 2>/dev/null || true
+tmp=$(mktemp -d "$tmp_base/appsignal-collect.XXXXXX") || exit 1
+trap 'rm -rf "$tmp"' EXIT INT TERM HUP
 
 http=$(curl -sS --max-time "$timeout" \
   -H "Content-Type: application/json" \
@@ -460,7 +469,8 @@ fetch_phase2_app() {
   # `cpu`'s "total_usage" state is already a direct, verified percentage (it
   # matches user+system+nice+iowait+steal); `memory`/`swap`'s "total" state is
   # unpopulated (always 0) on both hosts checked, so memPct/swapPct stay null
-  # rather than divide by a zero total.
+  # rather than divide by a zero total; the absolute "used" value in MB is kept
+  # as memUsedMb/swapUsedMb so the panel can still show real memory.
   local hm_body disk_body hmc dc
 
   hm_body=$(jq -n --arg site "$app_id" --arg from "$from15" --arg to "$to15" '
@@ -526,10 +536,15 @@ fetch_phase2_app() {
               shortName: ($host | shortName),
               cpuPct: ($agg.cpuPct // null),
               memPct: (if $hasMemTotal then (($agg.memUsedMb / $agg.memTotalMb) * 100) else null end),
+              # Absolute memory in MB, the only memory figure real hosts publish
+              # ("total" is always 0, so memPct is null there): the panel falls
+              # back to "MEM 1.1 GB" instead of showing nothing.
+              memUsedMb: ($agg.memUsedMb // null),
               load1: ($agg.load1 // null),
               diskPct: ($worstDisk.pct // null),
               diskMount: ($worstDisk.mountpoint // null),
-              swapPct: (if $hasSwapTotal then (($agg.swapUsedMb // 0) / $agg.swapTotalMb * 100) else null end)
+              swapPct: (if $hasSwapTotal then (($agg.swapUsedMb // 0) / $agg.swapTotalMb * 100) else null end),
+              swapUsedMb: ($agg.swapUsedMb // null)
             }
           | . + { warn: (
               ((.cpuPct // 0) >= $cpuWarn)

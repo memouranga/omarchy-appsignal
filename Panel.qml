@@ -383,8 +383,9 @@ Panel {
   }
 
   // Same pattern for a SERVERS row (v0.5). memPct/swapPct can be null (the
-  // collector could not derive a percentage — see SPEC.md "v0.5"): those
-  // clauses are simply left out of the prompt instead of printing "null%".
+  // collector could not derive a percentage — see SPEC.md "v0.5"): the prompt
+  // then carries the absolute megabytes instead, and a clause with neither
+  // figure is left out rather than printing "null%".
   function investigateHost(row) {
     if (!row || !root.bar) return
     var h = row.item || {}
@@ -398,12 +399,15 @@ Panel {
     var detail = []
     if (h.cpuPct !== null && h.cpuPct !== undefined) detail.push("CPU " + root.formatPercent(Number(h.cpuPct)))
     if (h.memPct !== null && h.memPct !== undefined) detail.push("memory " + root.formatPercent(Number(h.memPct)))
+    else if (h.memUsedMb !== null && h.memUsedMb !== undefined) detail.push("memory " + root.formatMb(h.memUsedMb) + " used")
     if (h.load1 !== null && h.load1 !== undefined) detail.push("load " + Number(h.load1).toFixed(2))
     if (h.diskPct !== null && h.diskPct !== undefined) {
       var diskText = "disk " + root.formatPercent(Number(h.diskPct))
       if (h.diskMount) diskText += " on " + h.diskMount
       detail.push(diskText)
     }
+    var swapText = root.hostSwapText(h)
+    if (swapText !== "") detail.push("swap " + swapText + " in use")
 
     var head = "Analyze host " + hostname + " of app " + appPart + " in AppSignal"
     var parts = [head + (detail.length > 0 ? ": " + detail.join(", ") : "") + "."]
@@ -528,6 +532,39 @@ Panel {
     if (n >= 10) return Math.round(n) + "%"
     if (n >= 1) return n.toFixed(1).replace(/\.0$/, "") + "%"
     return n.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "%"
+  }
+
+  // Absolute memory, in the megabytes AppSignal reports: "512 MB" below a
+  // gigabyte, "1.1 GB" above it.
+  function formatMb(n) {
+    var v = Number(n)
+    if (!isFinite(v) || v < 0) return ""
+    if (v < 1024) return Math.round(v) + " MB"
+    return (v / 1024).toFixed(1) + " GB"
+  }
+
+  // Memory for a host row. A real percentage wins when the host publishes a
+  // memory total; otherwise the absolute "used" figure is shown, which is all
+  // container hosts report (see SPEC.md "v0.5"). "n/a" only when neither exists.
+  function hostMemText(h) {
+    if (!h) return "n/a"
+    if (h.memPct !== null && h.memPct !== undefined) return Math.round(Number(h.memPct)) + "%"
+    if (h.memUsedMb !== null && h.memUsedMb !== undefined) {
+      var t = root.formatMb(h.memUsedMb)
+      if (t !== "") return t
+    }
+    return "n/a"
+  }
+
+  // Swap for a host row, and "" when the host is not swapping (or reports no
+  // swap at all) so the caller can drop the metric instead of printing a zero.
+  function hostSwapText(h) {
+    if (!h) return ""
+    if (h.swapPct !== null && h.swapPct !== undefined && Number(h.swapPct) > 0)
+      return Math.round(Number(h.swapPct)) + "%"
+    if (h.swapUsedMb !== null && h.swapUsedMb !== undefined && Number(h.swapUsedMb) > 0)
+      return root.formatMb(h.swapUsedMb)
+    return ""
   }
 
   // The health line under the app header: "1.2k req/h · 0.4% errors · 182 ms
@@ -1637,13 +1674,14 @@ Panel {
     }
   }
 
-  // One host reporting server metrics for the app (v0.5): server glyph,
-  // shortName + full hostname (dim, second line, hidden when they are the
-  // same string), and on the right "CPU 3% · MEM n/a · LOAD 0.04 · DISK 62%"
-  // with each metric colored urgent at or above its warn threshold. memPct/
-  // swapPct can be "n/a": AppSignal never reports a "total" state for either
-  // host verified against (see SPEC.md "v0.5"), so a percentage cannot be
-  // derived — shown as "n/a", never "NaN%" or silently dropped.
+  // One host reporting server metrics for the app (v0.5). Two lines, because
+  // the metric line ("CPU 4% · MEM 1.1 GB · LOAD 0.02 · DISK 37% · SWAP
+  // 512 MB") is far too long to share a line with the hostname at panel width:
+  // first the server glyph and the hostname (shortName in full color, the
+  // "-<container id>" tail dim), then the metrics underneath, each one colored
+  // urgent at or above its warn threshold. MEM falls back to absolute
+  // megabytes when the host publishes no memory total (every container host
+  // checked — see SPEC.md "v0.5"), and only shows "n/a" with neither figure.
   component HostRow: CursorSurface {
     id: hostRow
 
@@ -1666,17 +1704,38 @@ Panel {
       var load1Text = (h.load1 === null || h.load1 === undefined) ? "n/a" : Number(h.load1).toFixed(2)
       var parts = [
         "<font color=\"" + hostRow.metricColor(cpuOver) + "\">CPU " + hostRow.pctText(h.cpuPct) + "</font>",
-        "<font color=\"" + hostRow.metricColor(memOver) + "\">MEM " + hostRow.pctText(h.memPct) + "</font>",
+        "<font color=\"" + hostRow.metricColor(memOver) + "\">MEM " + root.hostMemText(h) + "</font>",
         "<font color=\"" + String(root.dim) + "\">LOAD " + load1Text + "</font>",
         "<font color=\"" + hostRow.metricColor(diskOver) + "\">DISK " + hostRow.pctText(h.diskPct) + "</font>"
       ]
+      // Swap only shows up when the host is actually swapping: a host with no
+      // swap in use (CloudHealth) would only add noise. Swapping never raises
+      // `warn` on its own, so this stays dim.
+      var swapText = root.hostSwapText(h)
+      if (swapText !== "")
+        parts.push("<font color=\"" + String(root.dim) + "\">SWAP " + swapText + "</font>")
       return parts.join("  ·  ")
+    }
+
+    // The full hostname, with everything shortName dropped (the container id)
+    // in the dim color: the whole name stays on screen without the noisy tail
+    // competing with the readable part.
+    readonly property string titleText: {
+      var full = hostRow.hostname !== "" ? hostRow.hostname : hostRow.shortName
+      if (full === "") return ""
+      // StyledText: a hostname is plain enough in practice, but it comes from
+      // an AppSignal tag, so it is escaped before being framed in markup.
+      function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") }
+      if (hostRow.shortName === "" || full.indexOf(hostRow.shortName) !== 0 || full === hostRow.shortName)
+        return esc(full)
+      return esc(hostRow.shortName) + "<font color=\"" + String(root.dim) + "\">" +
+        esc(full.substring(hostRow.shortName.length)) + "</font>"
     }
 
     foreground: root.foreground
     hasCursor: root.cursorActive && root.selectedRowIndex === hostRow.flatIndex
     implicitHeight: Math.max(Style.space(40),
-      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+      rowTitle.implicitHeight + rowStat.implicitHeight + Style.spacing.md * 2)
 
     Component.onCompleted: root.registerRow(hostRow)
     Component.onDestruction: root.unregisterRow(hostRow)
@@ -1685,8 +1744,8 @@ Panel {
       id: rowBody
       anchors.left: parent.left
       anchors.leftMargin: Style.space(10)
-      anchors.right: rowStat.left
-      anchors.rightMargin: Style.space(8)
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(2)
 
@@ -1707,7 +1766,8 @@ Panel {
           id: rowTitle
           anchors.verticalCenter: parent.verticalCenter
           width: parent.width - rowGlyph.width - parent.spacing
-          text: hostRow.shortName
+          textFormat: Text.StyledText
+          text: hostRow.titleText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -1722,28 +1782,16 @@ Panel {
         Item { width: rowGlyph.width; height: 1 }
 
         Text {
-          id: rowMeta
+          id: rowStat
           width: parent.width - rowGlyph.width - parent.spacing
-          text: hostRow.hostname
-          visible: text !== "" && text !== hostRow.shortName
-          color: root.dim
+          textFormat: Text.StyledText
+          text: hostRow.statText
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+          font.bold: true
           elide: Text.ElideRight
         }
       }
-    }
-
-    Text {
-      id: rowStat
-      anchors.right: parent.right
-      anchors.rightMargin: Style.space(10)
-      anchors.verticalCenter: rowBody.verticalCenter
-      textFormat: Text.StyledText
-      text: hostRow.statText
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: true
     }
 
     MouseArea {
