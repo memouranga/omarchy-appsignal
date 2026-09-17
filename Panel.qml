@@ -133,7 +133,7 @@ Panel {
   function appHasAlert(app) {
     var t = app ? app.totals || {} : {}
     return Number(t.errors || 0) > 0 || Number(t.monitorsDown || 0) > 0 || Number(t.hostsWarn || 0) > 0 ||
-      Number(t.alertsOpen || 0) > 0 || Number(t.checkInsFailing || 0) > 0
+      Number(t.alertsOpen || 0) > 0 || Number(t.checkInsFailing || 0) > 0 || Number(t.queuesWarn || 0) > 0
   }
 
   // Delegates inside the Repeater below sit in their own implicit Component,
@@ -493,8 +493,10 @@ Panel {
     var name = String(q.name || "")
     var detail = []
     if (Number(q.processed || 0) > 0) detail.push(root.plural(Math.round(Number(q.processed)), "job", "jobs") + " processed in the last hour")
-    if (q.queueTimeMs !== null && q.queueTimeMs !== undefined) detail.push("mean wait " + root.formatDuration(q.queueTimeMs))
+    if (q.queueTimeMs !== null && q.queueTimeMs !== undefined) detail.push("typical wait " + root.formatDuration(q.queueTimeMs))
+    if (q.queueTimeHighMs !== null && q.queueTimeHighMs !== undefined) detail.push("p95 wait " + root.formatDuration(q.queueTimeHighMs))
     if (Number(q.failed || 0) > 0) detail.push(Math.round(Number(q.failed)) + (Number(q.failed) === 1 ? " failed job" : " failed jobs"))
+    if (q.scheduled === true) detail.push("every job in the window was scheduled for later, not backed up")
 
     var head = "Analyze background queue " + name + " of app " + appPart + " in AppSignal"
     var parts = [head + (detail.length > 0 ? ": " + detail.join(", ") : "") + "."]
@@ -653,11 +655,11 @@ Panel {
     return ""
   }
 
-  // A JOBS queue-wait duration: "80 ms" below a second, "56 h" for the
-  // occasional queue whose mean is dominated by intentionally-delayed jobs
-  // (e.g. a mailers queue using deliver_later(wait:); see SPEC.md "v0.6" —
-  // 212,677,310 ms / ~59h was observed for real against SkillsNT prod, not a
-  // bug). "n/a" when the metric had no data point for that queue.
+  // A JOBS queue-wait duration: "80 ms" below a second, up to "56 h" for a
+  // genuinely backed-up queue. Queues whose wait is long only because their
+  // jobs were scheduled for later never reach this function — the collector
+  // flags them `scheduled` and the row prints that word instead (SPEC.md
+  // "v0.6"). "n/a" when the metric had no data point for that queue.
   function formatDuration(ms) {
     var v = Number(ms)
     if (!isFinite(v) || v < 0) return "n/a"
@@ -778,6 +780,7 @@ Panel {
       if (data.monitorsDown > 0) parts.push(root.plural(data.monitorsDown, "monitor", "monitors") + " down")
       if (data.checkInsFailing > 0) parts.push(root.plural(data.checkInsFailing, "check-in", "check-ins") + " failing")
       if (data.hostsWarn > 0) parts.push(root.plural(data.hostsWarn, "host", "hosts") + " hot")
+      if (data.queuesWarn > 0) parts.push(root.plural(data.queuesWarn, "queue", "queues") + " backed up")
       return parts.length > 0 ? parts.join(" · ") : "AppSignal"
     }
     onPressed: function(buttonCode) {
@@ -2166,16 +2169,26 @@ Panel {
 
     readonly property string name: jobRow.queue ? String(jobRow.queue.name || "") : ""
     readonly property bool warn: jobRow.queue ? jobRow.queue.warn === true : false
+    // v0.6: a queue whose *floor* wait is still hours holds nothing but jobs
+    // deliberately scheduled for later. Printing "56 h wait" there says
+    // "disaster" when the truth is "working as designed", so the row says
+    // "scheduled" in dim and never turns red. See SPEC.md "v0.6".
+    readonly property bool scheduled: jobRow.queue ? jobRow.queue.scheduled === true : false
     readonly property int failed: jobRow.queue ? Math.round(Number(jobRow.queue.failed || 0)) : 0
 
     readonly property string statText: {
       if (!jobRow.queue) return ""
       var q = jobRow.queue
       var waitColor = jobRow.warn ? String(root.urgent) : String(root.dim)
-      var waitText = (q.queueTimeMs === null || q.queueTimeMs === undefined) ? "n/a" : root.formatDuration(q.queueTimeMs)
+      var waitText = jobRow.scheduled
+        ? "scheduled"
+        : ((q.queueTimeMs === null || q.queueTimeMs === undefined)
+            ? "n/a wait"
+            : root.formatDuration(q.queueTimeMs) + " wait")
       var parts = [
-        "<font color=\"" + String(root.dim) + "\">" + root.formatCount(Number(q.processed || 0)) + " jobs/h</font>",
-        "<font color=\"" + waitColor + "\">" + waitText + " wait</font>"
+        "<font color=\"" + String(root.dim) + "\">" + root.formatCount(Number(q.processed || 0))
+          + (Math.round(Number(q.processed || 0)) === 1 ? " job/h" : " jobs/h") + "</font>",
+        "<font color=\"" + waitColor + "\">" + waitText + "</font>"
       ]
       if (jobRow.failed > 0)
         parts.push("<font color=\"" + String(root.urgent) + "\">" + jobRow.failed + " failed</font>")
@@ -2277,7 +2290,10 @@ Panel {
       var at = checkInRow.failing ? (c.lastErrorAt || c.lastUpdateAt) : (c.lastSuccessAt || c.lastUpdateAt)
       var ago = root.timeAgo(at || "", root.nowMs)
       var label = checkInRow.lastState !== "" ? checkInRow.lastState : "UNKNOWN"
-      return ago !== "" ? label + "  ·  " + ago + " ago" : label
+      // timeAgo() already reads as a phrase for the newest bucket ("just
+      // now"), so only the bare durations ("5h", "2d") take the " ago".
+      if (ago === "") return label
+      return label + "  ·  " + (ago === "just now" ? ago : ago + " ago")
     }
 
     foreground: root.foreground

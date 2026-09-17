@@ -36,6 +36,10 @@ Item {
   // warn thresholds — forwarded to the collector so it can compute
   // queues[].warn and totals.queuesWarn itself.
   property int queueTimeWarn: Math.max(1, Number(setting("queueTimeWarn", 30000)) || 30000)
+  // v0.6: comma-separated queue names the collector leaves out entirely, for
+  // queues that are noise on this machine's bar (e.g. a queue that only ever
+  // carries scheduled work). Empty by default.
+  readonly property string ignoreQueues: String(setting("ignoreQueues", "") || "")
   // "pinned" (default) shows only apps pinned in AppSignal, when at least one
   // exists; "all" always shows every app. No boolean setting type exists in
   // this Omarchy's manifest schema, so this reads as an enum.
@@ -119,7 +123,8 @@ Item {
                              "-cpu-warn", String(root.cpuWarn),
                              "-mem-warn", String(root.memWarn),
                              "-disk-warn", String(root.diskWarn),
-                             "-queue-time-warn", String(root.queueTimeWarn)]
+                             "-queue-time-warn", String(root.queueTimeWarn),
+                             "-ignore-queues", root.ignoreQueues]
     updateProcess.running = true
   }
 
@@ -192,8 +197,10 @@ Item {
           // v0.6: one entry per background queue (ActiveJob), from the same
           // metrics phase as health/slowActions/hosts — [] outside that
           // phase or on a failed request. Each entry: name, processed,
-          // failed, queueTimeMs (nullable), warn. Sorted by queueTimeMs desc,
-          // top incidentsPerApp already applied by the collector.
+          // failed, queueTimeMs (nullable, the floor wait — see SPEC.md
+          // "v0.6"), queueTimeHighMs (nullable p95), scheduled, warn. Warning
+          // queues first, scheduled ones last; top incidentsPerApp and the
+          // `ignoreQueues` filter already applied by the collector.
           queues: Array.isArray(a.queues) ? a.queues : [],
           // v0.6: open (OPEN/WARMUP) anomaly-detection alerts, straight from
           // the GraphQL phase — always populated when ready (not gated by
@@ -260,7 +267,11 @@ Item {
   readonly property int queuesWarn: Number(visibleTotals.queuesWarn || 0)
   readonly property int alertsOpen: Number(visibleTotals.alertsOpen || 0)
   readonly property bool urgent: monitorsDown > 0 || checkInsFailing > 0 || alertsOpen > 0
-  readonly property bool attentionNeeded: urgent || openErrors > 0 || hostsWarn > 0
+  // v0.6: queuesWarn lights the dot exactly like hostsWarn. It only counts
+  // queues with failed jobs or a *real* wait over the threshold — a queue full
+  // of deliberately delayed jobs is flagged `scheduled` by the collector and
+  // never warns, so this no longer fires permanently on a mailers queue.
+  readonly property bool attentionNeeded: urgent || openErrors > 0 || hostsWarn > 0 || queuesWarn > 0
 
   // ------------------------------------------------------- app selection
 

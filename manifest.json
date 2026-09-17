@@ -34,7 +34,8 @@
       "cpuWarn": 80,
       "memWarn": 85,
       "diskWarn": 85,
-      "queueTimeWarn": 30000
+      "queueTimeWarn": 30000,
+      "ignoreQueues": ""
     },
     "schema": [
       {
@@ -106,6 +107,13 @@
         "max": 600000,
         "step": 1000,
         "defaultValue": 30000
+      },
+      {
+        "key": "ignoreQueues",
+        "type": "string",
+        "label": "Job queues to ignore",
+        "defaultValue": "",
+        "description": "Comma-separated queue names the JOBS section leaves out entirely, e.g. \"mailers, low_priority\". Empty shows every queue."
       }
     ]
   }

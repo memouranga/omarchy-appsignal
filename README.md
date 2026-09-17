@@ -34,7 +34,7 @@
 - **Performance.** Open performance incidents when AppSignal has any (rare, it auto-closes them); otherwise the 24h slowest actions **ranked by impact** (mean duration × request count), split into WEB and BACKGROUND, each row showing mean, request count and the humanized daily total (e.g. "36 min/day").
 - **Servers.** One row per host reporting metrics for the app: CPU, memory, load average, the fullest disk, and swap when the host is actually swapping — each figure turning urgent-colored past its warn threshold. Memory shows a percentage when the host publishes a memory total, and the absolute figure ("MEM 1.1 GB") when it does not, which is the usual case on container hosts.
 - **Uptime monitors.** Each monitor with its up/down state and, when down, since when. Click to open it.
-- **Jobs.** One row per background queue (ActiveJob): jobs processed in the last hour, mean queue wait time (turning urgent past its warn threshold), and failed jobs if any.
+- **Jobs.** One row per background queue (ActiveJob): jobs processed in the last hour, how long a job actually waits before it starts (turning urgent past its warn threshold), and failed jobs if any. The wait figure deliberately ignores jobs that were scheduled for later with `deliver_later(wait:)` — otherwise one weekly mail leaves a mailers queue permanently red at "58 h wait". A queue that holds *nothing but* scheduled work says `scheduled` instead of a wait, and never warns. See `SPEC.md` ("v0.6") for the numbers behind that choice.
 - **Check-ins.** One row per cron/heartbeat check-in trigger: its kind and last state — "OK · 2h ago" or "MISSED · 5h ago" — always opens the browser.
 - **Last deploy.** A line at the foot of the app with the revision, who deployed it, how long it has been live, and errors since — when AppSignal has a real deploy marker for that app.
 - **Keyboard first.** `j`/`k` walk the rows, `h`/`l` (or `←`/`→`) switch apps, `1`-`9` jump to an app, `Enter` opens, `r` refreshes, `g`/`G` jump, `Esc` closes.
@@ -133,7 +133,8 @@ Set them on the widget entry in `~/.config/omarchy/shell.json`:
 | `cpuWarn` | `80` | Host CPU % at or above which a server row's CPU figure (and its warn dot) turns urgent |
 | `memWarn` | `85` | Same, for host memory % — only applies when AppSignal reports a usable memory total for the host; a host that only reports megabytes used shows them, and never warns on them (see `SPEC.md` "v0.5") |
 | `diskWarn` | `85` | Same, for the fullest disk mountpoint's % |
-| `queueTimeWarn` | `30000` | Job queue mean wait time, in milliseconds, at or above which a job row's wait figure turns urgent |
+| `queueTimeWarn` | `30000` | Job queue wait time, in milliseconds, at or above which a job row's wait figure turns urgent. A `scheduled` queue never warns; a queue with failed jobs always does |
+| `ignoreQueues` | *(empty)* | Comma-separated queue names to leave out of the Jobs section entirely, e.g. `mailers, low_priority` |
 
 ### Pinning apps in AppSignal
 
@@ -198,13 +199,18 @@ anomaly-detection alerts and the last deploy marker. A monitor counts as down wh
 alert in `OPEN` or `WARMUP` state; the same two states are what makes an anomaly-detection alert show
 up in the ALERTS section (`App.alerts` has no server-side state filter, so this is filtered client-side).
 
+Check-ins and alerts are the newest — and least essential — part of that query, and GraphQL rejects a
+whole document over one unknown field. So if AppSignal ever changes those fields, the collector retries
+once without them rather than losing errors, performance, uptime and deploys along with them; the
+overview then arrives with those two sections empty and a note in its `error` field.
+
 Second, for apps pinned in AppSignal only (or, with nothing pinned, the first 6 apps — to keep the
 request count bounded), five read-only requests to the
 [metrics API](https://docs.appsignal.com/api/v2/metrics.md) fetch: the last hour's health (throughput,
 error rate, mean duration); the 24h slowest actions, ranked by impact (mean × count) and split into
 web/background; the last 15 minutes of host metrics (CPU, memory, swap, load, disk — two requests,
 since CPU/memory/swap and disk usage need different tag groupings); and the last hour's job queues
-(jobs processed, failed, and mean queue wait time per background queue). This phase runs in parallel
+(jobs processed, failed, and two views of the wait time per background queue). This phase runs in parallel
 per app with its own timeout; if any of these fail for an app, that app's health line, performance,
 servers or jobs section is simply empty — the rest of the overview is unaffected. The exact queries,
 and how each host percentage and job-queue figure is derived, are documented in `SPEC.md` ("v0.4",

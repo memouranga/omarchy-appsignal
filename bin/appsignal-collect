@@ -24,6 +24,13 @@ cpu_warn=80
 mem_warn=85
 disk_warn=85
 queue_time_warn=30000
+ignore_queues=""
+
+# v0.6: a queue whose *floor* wait (the quietest minute of the window) is still
+# this long is not running anything "now" — every job in it was deliberately
+# scheduled for later (deliver_later(wait:), set(wait_until:)). Such a queue is
+# reported as scheduled:true and never warns. See SPEC.md "v0.6".
+readonly SCHEDULED_FLOOR_MS=3600000
 
 usage() {
   cat <<'USAGE'
@@ -36,6 +43,7 @@ Usage: appsignal-collect [options]
   -mem-warn PCT           Host memory % warn threshold (default: 85)
   -disk-warn PCT          Host disk % warn threshold (default: 85)
   -queue-time-warn MS     Job queue wait time warn threshold, ms (default: 30000)
+  -ignore-queues LIST     Comma-separated queue names to leave out (default: none)
 USAGE
 }
 
@@ -49,6 +57,7 @@ while (($#)); do
     -mem-warn|--mem-warn) mem_warn=$2; shift 2 ;;
     -disk-warn|--disk-warn) disk_warn=$2; shift 2 ;;
     -queue-time-warn|--queue-time-warn) queue_time_warn=$2; shift 2 ;;
+    -ignore-queues|--ignore-queues) ignore_queues=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "appsignal-collect: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -60,6 +69,11 @@ done
 [[ $mem_warn =~ ^[0-9]+$ ]] || mem_warn=85
 [[ $disk_warn =~ ^[0-9]+$ ]] || disk_warn=85
 [[ $queue_time_warn =~ ^[0-9]+$ ]] || queue_time_warn=30000
+
+# "mailers, low_priority" -> ["mailers","low_priority"]. Trimmed, empties
+# dropped, so a trailing comma or a blank setting is harmless.
+ignore_queues_json=$(jq -n --arg raw "$ignore_queues" \
+  '[$raw | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(. != "")]')
 
 for tool in curl jq; do
   command -v "$tool" >/dev/null 2>&1 || { echo "appsignal-collect: $tool is required" >&2; exit 1; }
@@ -107,6 +121,13 @@ fi
 
 # One request: every org, every app, and per app the open incident heads,
 # uptime monitors with their alerts, check-in triggers and the last deploy.
+#
+# The two newest blocks — `checkIns` and `alerts` (v0.6) — are marked with
+# `#opt` so a schema change on AppSignal's side can only cost us those two
+# sections and not the whole overview: on a GraphQL `errors` response the
+# request is retried once with every `#opt` line removed (see below). They are
+# the riskiest fields here and the least essential; errors, performance,
+# uptime and deploys are years-old API surface.
 read -r -d '' QUERY <<'GQL' || true
 query OmarchyOverview($limit: Int!) {
   viewer {
@@ -157,29 +178,29 @@ query OmarchyOverview($limit: Int!) {
             message
           }
         }
-        checkIns {
-          triggers {
-            id
-            identifier
-            kind
-            lastState
-            lastErrorAt
-            lastSuccessAt
-            lastUpdateAt
-          }
-        }
-        alerts {
-          id
-          state
-          openedAt
-          lastValue
-          peakValue
-          message
-          trigger {
-            name
-            metricName
-          }
-        }
+        checkIns {                #opt
+          triggers {              #opt
+            id                    #opt
+            identifier            #opt
+            kind                  #opt
+            lastState             #opt
+            lastErrorAt           #opt
+            lastSuccessAt         #opt
+            lastUpdateAt          #opt
+          }                       #opt
+        }                         #opt
+        alerts {                  #opt
+          id                      #opt
+          state                   #opt
+          openedAt                #opt
+          lastValue               #opt
+          peakValue               #opt
+          message                 #opt
+          trigger {               #opt
+            name                  #opt
+            metricName            #opt
+          }                       #opt
+        }                         #opt
         deployMarkers(limit: 1) {
           id
           createdAt
@@ -195,8 +216,6 @@ query OmarchyOverview($limit: Int!) {
 }
 GQL
 
-body=$(jq -n --arg q "$QUERY" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}')
-
 # Scratch dir. It lives under $XDG_RUNTIME_DIR (tmpfs, wiped at logout) rather
 # than /tmp, and carries our own name, because the shell starts this collector
 # as a child process and SIGKILLs it on `omarchy restart shell`: no trap can run
@@ -209,10 +228,44 @@ find "$tmp_base" -maxdepth 1 -type d -name 'appsignal-collect.*' -mmin +60 \
 tmp=$(mktemp -d "$tmp_base/appsignal-collect.XXXXXX") || exit 1
 trap 'rm -rf "$tmp"' EXIT INT TERM HUP
 
-http=$(curl -sS --max-time "$timeout" \
-  -H "Content-Type: application/json" \
-  -X POST "$ENDPOINT?token=$token" \
-  -d "$body" -o "$tmp/resp.json" -w '%{http_code}' 2>"$tmp/curl.err") || http=000
+run_query() {
+  local gql=$1 body
+  body=$(jq -n --arg q "$gql" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}')
+  curl -sS --max-time "$timeout" \
+    -H "Content-Type: application/json" \
+    -X POST "$ENDPOINT?token=$token" \
+    -d "$body" -o "$tmp/resp.json" -w '%{http_code}' 2>"$tmp/curl.err" || echo 000
+}
+
+gql_failed() {
+  jq -e '.errors and (.errors | length > 0)' "$tmp/resp.json" >/dev/null 2>&1
+}
+
+gql_errors() {
+  jq -r '[.errors[]?.message] | join("; ")' "$tmp/resp.json" 2>/dev/null | head -c 300
+}
+
+http=$(run_query "$QUERY")
+
+# One retry without the optional blocks. If AppSignal renames or removes a
+# field inside `checkIns`/`alerts`, GraphQL rejects the *whole* document and
+# the plugin would go dark on errors, performance, uptime and deploys too —
+# for two sections that are empty on most apps. Retrying once with those lines
+# stripped costs one request in a case that should never happen, and degrades
+# to "no check-ins, no alerts" instead of "no AppSignal".
+#
+# A validation error arrives as HTTP 400 with an `errors` array (verified by
+# renaming a field in a copy of this script), not as a 200 — so both are
+# accepted here. 401/403 is a token problem and must not be retried.
+degraded=""
+if [[ $http == 200 || $http == 400 || $http == 422 ]] \
+   && jq -e . "$tmp/resp.json" >/dev/null 2>&1 && gql_failed; then
+  echo "appsignal-collect: GraphQL rejected the query ($(gql_errors)); retrying without check-ins and alerts" >&2
+  http=$(run_query "$(grep -v '#opt' <<<"$QUERY")")
+  if [[ $http == 200 ]] && jq -e . "$tmp/resp.json" >/dev/null 2>&1 && ! gql_failed; then
+    degraded="Check-ins and alerts unavailable (AppSignal schema changed)."
+  fi
+fi
 
 # ------------------------------------------------------- failure handling
 
@@ -238,21 +291,25 @@ if [[ $http == 401 || $http == 403 ]]; then
   exit 0
 fi
 if [[ $http != 200 ]]; then
-  emit_stale "AppSignal returned HTTP $http."
+  if gql_failed; then
+    emit_stale "GraphQL: $(gql_errors)"
+  else
+    emit_stale "AppSignal returned HTTP $http."
+  fi
   exit 0
 fi
 if ! jq -e . "$tmp/resp.json" >/dev/null 2>&1; then
   emit_stale "AppSignal returned a non-JSON body."
   exit 0
 fi
-if jq -e '.errors and (.errors | length > 0)' "$tmp/resp.json" >/dev/null 2>&1; then
+if gql_failed; then
   emit_stale "GraphQL: $(jq -r '[.errors[].message] | join("; ")' "$tmp/resp.json" | head -c 300)"
   exit 0
 fi
 
 # ------------------------------------------------------------ transform
 
-jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
+jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" --arg degraded "$degraded" '
   def site_url($org; $app): "https://appsignal.com/\($org)/sites/\($app)";
   def open_alerts: [ (.alerts // [])[] | select(.state == "OPEN" or .state == "WARMUP") ];
   def sev: (.severity // "") | ascii_downcase;
@@ -263,7 +320,7 @@ jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
       ready: true,
       stale: false,
       authHelpText: "",
-      error: "",
+      error: $degraded,
       updatedAt: $now,
       viewer: { name: ($viewer.name // ""), email: ($viewer.email // "") },
       organizations: [
@@ -600,11 +657,25 @@ fetch_phase2_app() {
   #
   # One POST for every background queue (ActiveJob): job_count split into two
   # selectors with a *fixed* (non-wildcard) "status" tag each — "processed"
-  # and "failed" — plus queue_time's mean wait, all grouped by "queue" alone.
+  # and "failed" — plus two views of queue_time, all grouped by "queue" alone.
   # A fixed tag on a selector does not need to appear in group_by (only a "*"
   # wildcard does), so this single request works even though
-  # active_job_queue_time has no "status" tag at all. See SPEC.md "v0.6" for
-  # the verification against real data (SkillsNT/CloudHealth prod).
+  # active_job_queue_time has no "status" tag at all.
+  #
+  # Why MEAN aggregated with MIN and not with AVERAGE (v0.6 fix): a mean over
+  # the whole window mixes jobs that wanted to run *now* with jobs that were
+  # deliberately scheduled for later (deliver_later(wait:)), and one weekly
+  # mail turns the number into days. Real numbers, SkillsNT prod `mailers`,
+  # same hour: MEAN/AVERAGE 209,828,950 ms (58 h) vs MEAN/MIN 41 ms — the
+  # second is the latency a job actually pays when it is ready to run. P50
+  # would have been the textbook answer but AppSignal does not store it for
+  # this metric ("Invalid field: 'p_50'"); only MEAN, COUNT, P90 and P95 are
+  # valid fields, and P90/P95 are computed *inside* each bucket, so they carry
+  # exactly the same scheduled-job contamination (mailers P95 209,828,951 ms).
+  # queueTimeHighMs (P95 over the window) is kept as the contrasting "worst
+  # view" for the agent prompt. Note the API drops duplicate selectors on the
+  # same metric+field, so each of these four must use a distinct field.
+  # See SPEC.md "v0.6" for the full distribution table.
   local jobs_body jc
 
   jobs_body=$(jq -n --arg site "$app_id" --arg from "$from1" --arg to "$to1" '
@@ -612,7 +683,8 @@ fetch_phase2_app() {
      select:[
        {id:"processed", name:"active_job_queue_job_count", tags:{queue:"*", status:"processed"}, field:"COUNTER", aggregation:"SUM"},
        {id:"failed", name:"active_job_queue_job_count", tags:{queue:"*", status:"failed"}, field:"COUNTER", aggregation:"SUM"},
-       {id:"queueTimeMs", name:"active_job_queue_time", tags:{queue:"*"}, field:"MEAN", aggregation:"AVERAGE"}
+       {id:"queueTimeMs", name:"active_job_queue_time", tags:{queue:"*"}, field:"MEAN", aggregation:"MIN"},
+       {id:"queueTimeHighMs", name:"active_job_queue_time", tags:{queue:"*"}, field:"P95", aggregation:"AVERAGE"}
      ],
      group_by:[{Tag:"queue"}], limit:100}')
 
@@ -621,14 +693,33 @@ fetch_phase2_app() {
     -X POST "$METRICS_ENDPOINT" -d "$jobs_body" -o "$jobs_out.raw" -w '%{http_code}' 2>/dev/null) || jc=000
 
   if [[ $jc == 200 ]] && jq -e '.rows and (.error | not)' "$jobs_out.raw" >/dev/null 2>&1; then
-    jq --argjson limit "$limit" --argjson queueTimeWarn "$queue_time_warn" '
+    jq --argjson limit "$limit" --argjson queueTimeWarn "$queue_time_warn" \
+       --argjson scheduledFloor "$SCHEDULED_FLOOR_MS" --argjson ignore "$ignore_queues_json" '
       [ (.rows // [])[]
         | { name: (.group.queue // ""),
             processed: (.data.processed // 0),
             failed: (.data.failed // 0),
-            queueTimeMs: (.data.queueTimeMs // null) }
-        | . + { warn: (.queueTimeMs != null and .queueTimeMs >= $queueTimeWarn) }
-      ] | sort_by(-(.queueTimeMs // 0)) | .[0:$limit]
+            queueTimeMs: (.data.queueTimeMs // null),
+            queueTimeHighMs: (.data.queueTimeHighMs // null) }
+        | select((.name | IN($ignore[])) | not)
+        # Even the floor is hours: nothing in this queue is waiting to run now,
+        # it is a schedule. Show it as such instead of as a red backlog.
+        | . + { scheduled: (.queueTimeMs != null and .queueTimeMs >= $scheduledFloor) }
+        | . + { warn: (
+            (.failed > 0)
+            or ((.scheduled | not) and .queueTimeMs != null and .queueTimeMs >= $queueTimeWarn)
+          ) }
+      ]
+      # Anything warning first, a scheduled queue last, and the rest by
+      # throughput. Sorting healthy queues by wait (as v0.6 first did) ranks
+      # them by noise now that the waits are all tens of milliseconds, and it
+      # pushed the busiest queue of the app off the top-N list; whatever is
+      # actually wrong floats up through .warn anyway.
+      | sort_by([ (if .warn then 0 else 1 end),
+                  (if .scheduled then 1 else 0 end),
+                  -(.processed // 0),
+                  -(.queueTimeMs // 0) ])
+      | .[0:$limit]
     ' "$jobs_out.raw" > "$jobs_out" 2>/dev/null || echo '[]' > "$jobs_out"
   else
     echo '[]' > "$jobs_out"
