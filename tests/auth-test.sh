@@ -5,7 +5,7 @@
 # is only for a GraphQL validation error on 200/400/422 — see bin/
 # appsignal-collect's own comment on gql_failed/run_query).
 
-# shellcheck source=helper.sh
+# shellcheck source=tests/helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "401"

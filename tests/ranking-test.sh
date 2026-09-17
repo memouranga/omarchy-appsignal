@@ -5,7 +5,7 @@
 # namespace, one high-count/low-mean row that should outrank a low-count/
 # high-mean row, plus a fourth, lowest-impact row that should be cut off.
 
-# shellcheck source=helper.sh
+# shellcheck source=tests/helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "performance: impact ranking (web/background)"

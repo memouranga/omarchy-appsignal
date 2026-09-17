@@ -7,7 +7,7 @@
 # the second call's answer, and deliberately omits checkIns/alerts entirely
 # to prove the transform's `// {}` / `// []` fallbacks hold up even then.
 
-# shellcheck source=helper.sh
+# shellcheck source=tests/helper.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/helper.sh"
 
 echo "graphql retry (#opt stripped)"
