@@ -20,6 +20,9 @@ output=""
 limit=5
 timeout=30
 metrics_timeout=20
+cpu_warn=80
+mem_warn=85
+disk_warn=85
 
 usage() {
   cat <<'USAGE'
@@ -28,6 +31,9 @@ Usage: appsignal-collect [options]
   -limit N                Incident rows per app, also top N slow actions (default: 5)
   -timeout SECS           GraphQL request deadline (default: 30)
   -metrics-timeout SECS   Per-request deadline for the metrics API phase (default: 20)
+  -cpu-warn PCT           Host CPU % warn threshold (default: 80)
+  -mem-warn PCT           Host memory % warn threshold (default: 85)
+  -disk-warn PCT          Host disk % warn threshold (default: 85)
 USAGE
 }
 
@@ -37,6 +43,9 @@ while (($#)); do
     -limit|--limit) limit=$2; shift 2 ;;
     -timeout|--timeout) timeout=$2; shift 2 ;;
     -metrics-timeout|--metrics-timeout) metrics_timeout=$2; shift 2 ;;
+    -cpu-warn|--cpu-warn) cpu_warn=$2; shift 2 ;;
+    -mem-warn|--mem-warn) mem_warn=$2; shift 2 ;;
+    -disk-warn|--disk-warn) disk_warn=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "appsignal-collect: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -44,6 +53,9 @@ done
 [[ $limit =~ ^[0-9]+$ ]] || limit=5
 [[ $timeout =~ ^[0-9]+$ ]] || timeout=30
 [[ $metrics_timeout =~ ^[0-9]+$ ]] || metrics_timeout=20
+[[ $cpu_warn =~ ^[0-9]+$ ]] || cpu_warn=80
+[[ $mem_warn =~ ^[0-9]+$ ]] || mem_warn=85
+[[ $disk_warn =~ ^[0-9]+$ ]] || disk_warn=85
 
 for tool in curl jq; do
   command -v "$tool" >/dev/null 2>&1 || { echo "appsignal-collect: $tool is required" >&2; exit 1; }
@@ -356,6 +368,7 @@ jq --arg now "$(now_iso)" --argjson v "$SCHEMA_VERSION" '
 
 now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 hours_ago_utc() { date -u -d "-$1 hour" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-"$1"H +%Y-%m-%dT%H:%M:%SZ; }
+minutes_ago_utc() { date -u -d "-$1 minute" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-"$1"M +%Y-%m-%dT%H:%M:%SZ; }
 
 mapfile -t all_app_ids < <(jq -r '(.data.viewer.organizations // [])[] | (.apps // [])[] | .id' "$tmp/resp.json")
 mapfile -t pinned_app_ids < <(jq -r '(.data.viewer.organizations // [])[] | (.apps // [])[] | select(.viewerPinned == true) | .id' "$tmp/resp.json")
@@ -368,13 +381,15 @@ else
 fi
 
 fetch_phase2_app() {
-  local app_id=$1 health_out=$2 slow_out=$3
-  local from1 to1 from24 to24 health_body slow_body hc sc
+  local app_id=$1 health_out=$2 slow_out=$3 hosts_out=$4
+  local from1 to1 from24 to24 from15 to15 health_body slow_body hc sc
 
   to1=$(now_utc)
   from1=$(hours_ago_utc 1)
   to24=$to1
   from24=$(hours_ago_utc 24)
+  to15=$to1
+  from15=$(minutes_ago_utc 15)
 
   health_body=$(jq -n --arg site "$app_id" --arg from "$from1" --arg to "$to1" '
     {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
@@ -436,11 +451,101 @@ fetch_phase2_app() {
   else
     echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}' > "$slow_out"
   fi
+
+  # ------------------------------------------------------------- v0.5: hosts
+  #
+  # Two POSTs (see SPEC.md "v0.5" for why not one): cpu/memory/swap/load_avg
+  # share the "state" tag dimension; disk_usage uses "mountpoint" instead, and
+  # mixing both dimensions in one group_by produces a confusing cross-product.
+  # `cpu`'s "total_usage" state is already a direct, verified percentage (it
+  # matches user+system+nice+iowait+steal); `memory`/`swap`'s "total" state is
+  # unpopulated (always 0) on both hosts checked, so memPct/swapPct stay null
+  # rather than divide by a zero total.
+  local hm_body disk_body hmc dc
+
+  hm_body=$(jq -n --arg site "$app_id" --arg from "$from15" --arg to "$to15" '
+    {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
+     select:[
+       {id:"cpu", name:"cpu", tags:{state:"*", hostname:"*"}, field:"GAUGE", aggregation:"AVERAGE"},
+       {id:"memUsed", name:"memory", tags:{state:"used", hostname:"*"}, field:"GAUGE", aggregation:"AVERAGE"},
+       {id:"memTotal", name:"memory", tags:{state:"total", hostname:"*"}, field:"GAUGE", aggregation:"AVERAGE"},
+       {id:"swap", name:"swap", tags:{state:"*", hostname:"*"}, field:"GAUGE", aggregation:"AVERAGE"},
+       {id:"load1", name:"load_avg", tags:{hostname:"*"}, field:"GAUGE", aggregation:"AVERAGE"}
+     ],
+     group_by:[{Tag:"hostname"}, {Tag:"state"}], limit:100}')
+
+  disk_body=$(jq -n --arg site "$app_id" --arg from "$from15" --arg to "$to15" '
+    {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
+     select:[{id:"disk", name:"disk_usage", tags:{mountpoint:"*", hostname:"*"}, field:"GAUGE", aggregation:"AVERAGE"}],
+     group_by:[{Tag:"hostname"}, {Tag:"mountpoint"}], limit:100}')
+
+  hmc=$(curl -sS --max-time "$metrics_timeout" \
+    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+    -X POST "$METRICS_ENDPOINT" -d "$hm_body" -o "$hosts_out.hm.raw" -w '%{http_code}' 2>/dev/null) || hmc=000
+  dc=$(curl -sS --max-time "$metrics_timeout" \
+    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+    -X POST "$METRICS_ENDPOINT" -d "$disk_body" -o "$hosts_out.disk.raw" -w '%{http_code}' 2>/dev/null) || dc=000
+
+  if [[ $hmc == 200 && $dc == 200 ]] \
+     && jq -e '.rows and (.error | not)' "$hosts_out.hm.raw" >/dev/null 2>&1 \
+     && jq -e '.rows and (.error | not)' "$hosts_out.disk.raw" >/dev/null 2>&1; then
+    jq -n --slurpfile hm "$hosts_out.hm.raw" --slurpfile disk "$hosts_out.disk.raw" \
+      --argjson cpuWarn "$cpu_warn" --argjson memWarn "$mem_warn" --argjson diskWarn "$disk_warn" '
+      # Strip a trailing "-<container id>" from a hostname when what is left
+      # looks like an IP or a legible name (both real hosts are
+      # "<ip>-<container id>"): "178.156.134.200-94c077fa010a" ->
+      # "178.156.134.200".
+      def shortName:
+        . as $h
+        | if ($h | test("^.+-[^-]+$")) then
+            ($h | sub("-[^-]+$"; "")) as $prefix
+            | if ($prefix | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                or ($prefix | test("^[A-Za-z][A-Za-z0-9_.]*$"))
+              then $prefix else $h end
+          else $h end;
+
+      ($hm[0].rows // []) as $hmRows
+      | ($disk[0].rows // []) as $diskRows
+      | ( ($hmRows | map(.group.hostname)) + ($diskRows | map(.group.hostname)) | unique ) as $hostnames
+      | [ $hostnames[] as $host
+          | ($hmRows | map(select(.group.hostname == $host))) as $rows
+          | ($diskRows | map(select(.group.hostname == $host))) as $dRows
+          | (reduce $rows[] as $r ({};
+              . + (if $r.data.memUsed != null then {memUsedMb: $r.data.memUsed} else {} end)
+                + (if ($r.data.memTotal != null and $r.group.state == "total") then {memTotalMb: $r.data.memTotal} else {} end)
+                + (if ($r.data.cpu != null and $r.group.state == "total_usage") then {cpuPct: $r.data.cpu} else {} end)
+                + (if ($r.data.swap != null and $r.group.state == "used") then {swapUsedMb: $r.data.swap} else {} end)
+                + (if ($r.data.swap != null and $r.group.state == "total") then {swapTotalMb: $r.data.swap} else {} end)
+                + (if $r.data.load1 != null then {load1: $r.data.load1} else {} end)
+            )) as $agg
+          | ($dRows | map({mountpoint: .group.mountpoint, pct: .data.disk}) | sort_by(-.pct) | (.[0] // null)) as $worstDisk
+          | (($agg.memTotalMb // 0) > 0) as $hasMemTotal
+          | (($agg.swapTotalMb // 0) > 0) as $hasSwapTotal
+          | {
+              hostname: $host,
+              shortName: ($host | shortName),
+              cpuPct: ($agg.cpuPct // null),
+              memPct: (if $hasMemTotal then (($agg.memUsedMb / $agg.memTotalMb) * 100) else null end),
+              load1: ($agg.load1 // null),
+              diskPct: ($worstDisk.pct // null),
+              diskMount: ($worstDisk.mountpoint // null),
+              swapPct: (if $hasSwapTotal then (($agg.swapUsedMb // 0) / $agg.swapTotalMb * 100) else null end)
+            }
+          | . + { warn: (
+              ((.cpuPct // 0) >= $cpuWarn)
+              or ((.diskPct // 0) >= $diskWarn)
+              or (.memPct != null and .memPct >= $memWarn)
+            ) }
+        ]
+    ' > "$hosts_out" 2>/dev/null || echo '[]' > "$hosts_out"
+  else
+    echo '[]' > "$hosts_out"
+  fi
 }
 
 if ((${#phase2_ids[@]} > 0)); then
   for app_id in "${phase2_ids[@]}"; do
-    fetch_phase2_app "$app_id" "$tmp/health_$app_id.json" "$tmp/slow_$app_id.json" &
+    fetch_phase2_app "$app_id" "$tmp/health_$app_id.json" "$tmp/slow_$app_id.json" "$tmp/hosts_$app_id.json" &
   done
   wait
 fi
@@ -451,11 +556,15 @@ fi
     jq -n --arg id "$app_id" \
       --slurpfile h <(cat "$tmp/health_$app_id.json" 2>/dev/null || echo null) \
       --slurpfile s <(cat "$tmp/slow_$app_id.json" 2>/dev/null || echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}') \
+      --slurpfile hosts <(cat "$tmp/hosts_$app_id.json" 2>/dev/null || echo '[]') \
       '{($id): {health: ($h[0] // null), slowWeb: ($s[0].slowWeb // []),
-                slowBackground: ($s[0].slowBackground // []), slowActions: ($s[0].slowActions // [])}}'
+                slowBackground: ($s[0].slowBackground // []), slowActions: ($s[0].slowActions // []),
+                hosts: ($hosts[0] // [])}}'
   done
 } | jq -s 'add' > "$tmp/phase2.json"
 
+# v0.5: merge hosts, then recompute totals.hostsWarn (per app and global) now
+# that hosts exist — phase1's .totals was built before this data landed.
 jq --slurpfile p2 "$tmp/phase2.json" '
   ($p2[0] // {}) as $p2
   | .organizations = [
@@ -465,7 +574,10 @@ jq --slurpfile p2 "$tmp/phase2.json" '
           | . + { health: ($p2[.id].health // null),
                   slowWeb: ($p2[.id].slowWeb // []),
                   slowBackground: ($p2[.id].slowBackground // []),
-                  slowActions: ($p2[.id].slowActions // []) }
+                  slowActions: ($p2[.id].slowActions // []),
+                  hosts: ($p2[.id].hosts // []) }
+          | .totals.hostsWarn = ([.hosts[] | select(.warn == true)] | length)
         ]
     ]
+  | .totals.hostsWarn = ([.organizations[].apps[].totals.hostsWarn] | add // 0)
 ' "$tmp/phase1.json" | write_out

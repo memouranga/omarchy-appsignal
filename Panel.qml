@@ -33,6 +33,7 @@ Panel {
   readonly property string glyphUptime: "󰖟"     // globe
   readonly property string glyphRefresh: "󰑐"    // refresh
   readonly property string glyphSpeedometer: "󰓅" // mdi-speedometer (U+F04C5)
+  readonly property string glyphServer: "󰒋"      // mdi-server (U+F048B)
 
   // ---------------------------------------------------------------- rows
 
@@ -82,6 +83,12 @@ Panel {
       for (var sb = 0; sb < slowBg.length; sb++)
         rows.push({ kind: "slow", app: app, item: slowBg[sb], url: app.perfUrl })
     }
+    // SERVERS (v0.5): sits between PERFORMANCE and UPTIME. Right-click/`o`
+    // always opens app.url (the real host-metrics route could not be
+    // confirmed without an authenticated browser session; see SPEC.md).
+    var hosts = root.asList(app.hosts)
+    for (var h = 0; h < hosts.length; h++)
+      rows.push({ kind: "host", app: app, item: hosts[h], url: app.url })
     var mons = root.asList(app.monitors)
     for (var k = 0; k < mons.length; k++)
       rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
@@ -109,7 +116,7 @@ Panel {
 
   function appHasAlert(app) {
     var t = app ? app.totals || {} : {}
-    return Number(t.errors || 0) > 0 || Number(t.monitorsDown || 0) > 0
+    return Number(t.errors || 0) > 0 || Number(t.monitorsDown || 0) > 0 || Number(t.hostsWarn || 0) > 0
   }
 
   // Delegates inside the Repeater below sit in their own implicit Component,
@@ -266,6 +273,18 @@ Panel {
   // rows always open in the browser regardless of this setting.
   readonly property string incidentAction: String(root.setting("incidentAction", "agent") || "agent")
 
+  // v0.5: host warn thresholds, read straight from settings the same way as
+  // incidentAction — used only to color individual metrics in a SERVERS row;
+  // the collector already decided hosts[].warn (the tab dot / attention
+  // aggregate) using these same values passed as -cpu-warn/-mem-warn/-disk-warn.
+  function clampWarnPct(v, fallback) {
+    var n = Number(v)
+    return isFinite(n) && n > 0 ? Math.min(100, Math.max(1, n)) : fallback
+  }
+  readonly property int cpuWarnPct: root.clampWarnPct(root.setting("cpuWarn", 80), 80)
+  readonly property int memWarnPct: root.clampWarnPct(root.setting("memWarn", 85), 85)
+  readonly property int diskWarnPct: root.clampWarnPct(root.setting("diskWarn", 85), 85)
+
   function activateItem(row, viaBrowser) {
     if (!row) return
     if (row.kind === "error" && !viaBrowser && root.incidentAction !== "browser") {
@@ -274,6 +293,10 @@ Panel {
     }
     if ((row.kind === "perf" || row.kind === "slow") && !viaBrowser && root.incidentAction !== "browser") {
       root.investigatePerf(row)
+      return
+    }
+    if (row.kind === "host" && !viaBrowser && root.incidentAction !== "browser") {
+      root.investigateHost(row)
       return
     }
     root.openUrl(row.url)
@@ -354,6 +377,39 @@ Panel {
     if (url !== "") parts.push("URL: " + url + ".")
     parts.push("Use the AppSignal MCP to inspect performance samples and span breakdowns; find the " +
       "bottleneck and propose optimizations. Do not change anything in AppSignal unless I ask.")
+
+    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.close()
+  }
+
+  // Same pattern for a SERVERS row (v0.5). memPct/swapPct can be null (the
+  // collector could not derive a percentage — see SPEC.md "v0.5"): those
+  // clauses are simply left out of the prompt instead of printing "null%".
+  function investigateHost(row) {
+    if (!row || !root.bar) return
+    var h = row.item || {}
+    var app = row.app || {}
+
+    var appPart = String(app.name || "")
+    if (app.environment) appPart += " (" + app.environment + ")"
+
+    var hostname = String(h.hostname || h.shortName || "")
+
+    var detail = []
+    if (h.cpuPct !== null && h.cpuPct !== undefined) detail.push("CPU " + root.formatPercent(Number(h.cpuPct)))
+    if (h.memPct !== null && h.memPct !== undefined) detail.push("memory " + root.formatPercent(Number(h.memPct)))
+    if (h.load1 !== null && h.load1 !== undefined) detail.push("load " + Number(h.load1).toFixed(2))
+    if (h.diskPct !== null && h.diskPct !== undefined) {
+      var diskText = "disk " + root.formatPercent(Number(h.diskPct))
+      if (h.diskMount) diskText += " on " + h.diskMount
+      detail.push(diskText)
+    }
+
+    var head = "Analyze host " + hostname + " of app " + appPart + " in AppSignal"
+    var parts = [head + (detail.length > 0 ? ": " + detail.join(", ") : "") + "."]
+    parts.push("Use the AppSignal MCP to read host metrics over the last 24h and 7d, correlate with " +
+      "throughput, slow actions and background jobs, and propose concrete optimizations (right-sizing, " +
+      "memory, swap, disk cleanup, process counts). Do not change anything unless I ask.")
 
     root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
     root.close()
@@ -854,7 +910,10 @@ Panel {
             readonly property int perfRowCount: appSection.perfIncidents.length > 0
               ? appSection.perfIncidents.length
               : (appSection.slowWeb.length + appSection.slowBackground.length)
-            readonly property int monitorFlatOffset: appSection.errs.length + appSection.perfRowCount
+            // v0.5: SERVERS sits between PERFORMANCE and UPTIME.
+            readonly property var hosts: root.asList(appSection.app.hosts)
+            readonly property int hostsFlatOffset: appSection.errs.length + appSection.perfRowCount
+            readonly property int monitorFlatOffset: appSection.hostsFlatOffset + appSection.hosts.length
 
             PanelSeparator { foreground: root.foreground }
 
@@ -1043,6 +1102,33 @@ Panel {
                     action: modelData
                     flatIndex: appSection.errs.length + appSection.slowWeb.length + index
                   }
+                }
+              }
+            }
+
+            // ---- Servers ----
+            Column {
+              width: parent.width
+              visible: appSection.hosts.length > 0
+              spacing: Style.space(6)
+
+              PanelSectionHeader {
+                width: parent.width
+                text: "SERVERS"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: appSection.hosts
+
+                HostRow {
+                  required property var modelData
+                  required property int index
+
+                  width: appSection.width
+                  host: modelData
+                  flatIndex: appSection.hostsFlatOffset + index
                 }
               }
             }
@@ -1545,6 +1631,139 @@ Panel {
 
     PanelToolTip {
       visible: slowMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
+    }
+  }
+
+  // One host reporting server metrics for the app (v0.5): server glyph,
+  // shortName + full hostname (dim, second line, hidden when they are the
+  // same string), and on the right "CPU 3% · MEM n/a · LOAD 0.04 · DISK 62%"
+  // with each metric colored urgent at or above its warn threshold. memPct/
+  // swapPct can be "n/a": AppSignal never reports a "total" state for either
+  // host verified against (see SPEC.md "v0.5"), so a percentage cannot be
+  // derived — shown as "n/a", never "NaN%" or silently dropped.
+  component HostRow: CursorSurface {
+    id: hostRow
+
+    property var host: null
+    property int flatIndex: -1
+
+    readonly property string hostname: hostRow.host ? String(hostRow.host.hostname || "") : ""
+    readonly property string shortName: hostRow.host ? String(hostRow.host.shortName || hostRow.hostname) : ""
+    readonly property bool warn: hostRow.host ? hostRow.host.warn === true : false
+
+    function metricColor(overWarn) { return overWarn ? String(root.urgent) : String(root.dim) }
+    function pctText(value) { return (value === null || value === undefined) ? "n/a" : Math.round(Number(value)) + "%" }
+
+    readonly property string statText: {
+      if (!hostRow.host) return ""
+      var h = hostRow.host
+      var cpuOver = h.cpuPct !== null && h.cpuPct !== undefined && Number(h.cpuPct) >= root.cpuWarnPct
+      var memOver = h.memPct !== null && h.memPct !== undefined && Number(h.memPct) >= root.memWarnPct
+      var diskOver = h.diskPct !== null && h.diskPct !== undefined && Number(h.diskPct) >= root.diskWarnPct
+      var load1Text = (h.load1 === null || h.load1 === undefined) ? "n/a" : Number(h.load1).toFixed(2)
+      var parts = [
+        "<font color=\"" + hostRow.metricColor(cpuOver) + "\">CPU " + hostRow.pctText(h.cpuPct) + "</font>",
+        "<font color=\"" + hostRow.metricColor(memOver) + "\">MEM " + hostRow.pctText(h.memPct) + "</font>",
+        "<font color=\"" + String(root.dim) + "\">LOAD " + load1Text + "</font>",
+        "<font color=\"" + hostRow.metricColor(diskOver) + "\">DISK " + hostRow.pctText(h.diskPct) + "</font>"
+      ]
+      return parts.join("  ·  ")
+    }
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === hostRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(hostRow)
+    Component.onDestruction: root.unregisterRow(hostRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowStat.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphServer
+          color: hostRow.warn ? root.urgent : root.alpha(root.foreground, 0.60)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: hostRow.shortName
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowMeta
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: hostRow.hostname
+          visible: text !== "" && text !== hostRow.shortName
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    Text {
+      id: rowStat
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: rowBody.verticalCenter
+      textFormat: Text.StyledText
+      text: hostRow.statText
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    MouseArea {
+      id: hostMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[hostRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = hostRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: hostMouse.containsMouse
       text: root.incidentAction === "browser"
         ? "Click / Enter opens the browser"
         : "Click / Enter: agent  ·  right-click / o: browser"

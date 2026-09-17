@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "memong.appsignal",
   "name": "AppSignal",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "Memo Uranga",
   "license": "MIT",
-  "description": "AppSignal at a glance: open error and performance incidents, uptime monitors, check-ins and last deploy for every app you can see, in a native Omarchy bar panel.",
+  "description": "AppSignal at a glance: open error and performance incidents, server (CPU/memory/disk/load) health, uptime monitors, check-ins and last deploy for every app you can see, in a native Omarchy bar panel.",
   "kinds": [
     "bar-widget"
   ],
@@ -30,7 +30,10 @@
       "refreshIntervalSec": 120,
       "incidentsPerApp": 5,
       "incidentAction": "agent",
-      "onlyPinned": "pinned"
+      "onlyPinned": "pinned",
+      "cpuWarn": 80,
+      "memWarn": 85,
+      "diskWarn": 85
     },
     "schema": [
       {
@@ -66,6 +69,33 @@
         "options": ["pinned", "all"],
         "defaultValue": "pinned",
         "description": "\"pinned\" shows only the apps you pinned in AppSignal, as long as you've pinned at least one; \"all\" always shows every app. No boolean setting type exists in this Omarchy's schema, hence the enum."
+      },
+      {
+        "key": "cpuWarn",
+        "type": "integer",
+        "label": "Host CPU warn threshold (%)",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 80
+      },
+      {
+        "key": "memWarn",
+        "type": "integer",
+        "label": "Host memory warn threshold (%)",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 85
+      },
+      {
+        "key": "diskWarn",
+        "type": "integer",
+        "label": "Host disk warn threshold (%)",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 85
       }
     ]
   }

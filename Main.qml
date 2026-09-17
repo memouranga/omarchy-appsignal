@@ -27,6 +27,11 @@ Item {
   property int dataRevision: 0
   property int refreshIntervalSec: Math.max(30, Number(setting("refreshIntervalSec", 120)) || 120)
   property int incidentsPerApp: Math.max(1, Number(setting("incidentsPerApp", 5)) || 5)
+  // v0.5: host warn thresholds, forwarded to the collector so it can compute
+  // hosts[].warn and totals.hostsWarn itself (same pattern as incidentsPerApp).
+  property int cpuWarn: Math.min(100, Math.max(1, Number(setting("cpuWarn", 80)) || 80))
+  property int memWarn: Math.min(100, Math.max(1, Number(setting("memWarn", 85)) || 85))
+  property int diskWarn: Math.min(100, Math.max(1, Number(setting("diskWarn", 85)) || 85))
   // "pinned" (default) shows only apps pinned in AppSignal, when at least one
   // exists; "all" always shows every app. No boolean setting type exists in
   // this Omarchy's manifest schema, so this reads as an enum.
@@ -106,7 +111,10 @@ Item {
     if (now - root.lastRunMs < 15000) return
     root.lastRunMs = now
     updateProcess.command = [root.collectorPath, "-output", root.overviewPath,
-                             "-limit", String(root.incidentsPerApp)]
+                             "-limit", String(root.incidentsPerApp),
+                             "-cpu-warn", String(root.cpuWarn),
+                             "-mem-warn", String(root.memWarn),
+                             "-disk-warn", String(root.diskWarn)]
     updateProcess.running = true
   }
 
@@ -167,7 +175,11 @@ Item {
           // compatibility; the panel renders the two lists separately.
           slowWeb: Array.isArray(a.slowWeb) ? a.slowWeb : [],
           slowBackground: Array.isArray(a.slowBackground) ? a.slowBackground : [],
-          slowActions: Array.isArray(a.slowActions) ? a.slowActions : []
+          slowActions: Array.isArray(a.slowActions) ? a.slowActions : [],
+          // v0.5: one entry per host reporting metrics for this app; [] when
+          // the app was outside the collector's metrics phase or that host
+          // query failed for it.
+          hosts: Array.isArray(a.hosts) ? a.hosts : []
         })
       }
     }
@@ -194,14 +206,15 @@ Item {
 
   function attention(app) {
     var t = app.totals || {}
-    return Number(t.monitorsDown || 0) * 100 + Number(t.checkInsFailing || 0) * 50 + Number(t.errors || 0) * 2 + Number(t.perf || 0)
+    return Number(t.monitorsDown || 0) * 100 + Number(t.checkInsFailing || 0) * 50 +
+      Number(t.hostsWarn || 0) * 20 + Number(t.errors || 0) * 2 + Number(t.perf || 0)
   }
 
   // Totals over the visible apps only, so a pinned-down view doesn't have the
   // bar dot or tooltip alarm about apps the panel isn't even showing.
   readonly property var visibleTotals: {
     var list = root.apps
-    var out = { errors: 0, perf: 0, monitors: 0, monitorsDown: 0, checkIns: 0, checkInsFailing: 0 }
+    var out = { errors: 0, perf: 0, monitors: 0, monitorsDown: 0, checkIns: 0, checkInsFailing: 0, hostsWarn: 0 }
     for (var i = 0; i < list.length; i++) {
       var t = list[i].totals || {}
       out.errors += Number(t.errors || 0)
@@ -210,6 +223,7 @@ Item {
       out.monitorsDown += Number(t.monitorsDown || 0)
       out.checkIns += Number(t.checkIns || 0)
       out.checkInsFailing += Number(t.checkInsFailing || 0)
+      out.hostsWarn += Number(t.hostsWarn || 0)
     }
     return out
   }
@@ -218,8 +232,9 @@ Item {
   readonly property int openPerf: Number(visibleTotals.perf || 0)
   readonly property int monitorsDown: Number(visibleTotals.monitorsDown || 0)
   readonly property int checkInsFailing: Number(visibleTotals.checkInsFailing || 0)
+  readonly property int hostsWarn: Number(visibleTotals.hostsWarn || 0)
   readonly property bool urgent: monitorsDown > 0 || checkInsFailing > 0
-  readonly property bool attentionNeeded: urgent || openErrors > 0
+  readonly property bool attentionNeeded: urgent || openErrors > 0 || hostsWarn > 0
 
   // ------------------------------------------------------- app selection
 

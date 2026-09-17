@@ -30,7 +30,8 @@
 - **Only your favorites, if you have any.** Pin apps in AppSignal and the row shows just those; if nothing is pinned, it shows everything and says so.
 - **Open errors.** The latest open exception incidents for the selected app: exception class, action, occurrence count and age. Click one and it opens in AppSignal.
 - **Health at a glance.** A line under the app header with the last hour's throughput, error rate and mean response time — shown for pinned apps (the ones the collector fetches metrics for); omitted when there is nothing to show.
-- **Performance.** Open performance incidents when AppSignal has any (rare, it auto-closes them); otherwise the 24h slowest actions with their mean duration and request count.
+- **Performance.** Open performance incidents when AppSignal has any (rare, it auto-closes them); otherwise the 24h slowest actions **ranked by impact** (mean duration × request count), split into WEB and BACKGROUND, each row showing mean, request count and the humanized daily total (e.g. "36 min/day").
+- **Servers.** One row per host reporting metrics for the app: CPU, memory, load average and the fullest disk, with each figure turning urgent-colored past its warn threshold.
 - **Uptime monitors.** Each monitor with its up/down state and, when down, since when. Click to open it.
 - **Last deploy.** A line at the foot of the app with the revision, who deployed it, how long it has been live, and errors since — when AppSignal has a real deploy marker for that app.
 - **Keyboard first.** `j`/`k` walk the rows, `h`/`l` (or `←`/`→`) switch apps, `1`-`9` jump to an app, `Enter` opens, `r` refreshes, `g`/`G` jump, `Esc` closes.
@@ -71,16 +72,19 @@ It never goes into `shell.json`.
 | Right click on an error row, or `o` | Open the incident in the browser |
 | `Enter` or left click on a performance row | Investigate with your coding agent (or open the browser, see `incidentAction` below) |
 | Right click on a performance row, or `o` | Open it in the browser |
+| `Enter` or left click on a server row | Investigate the host with your coding agent (or open the browser, see `incidentAction` below) |
+| Right click on a server row, or `o` | Open the app in the browser |
 | `Enter` or click on a monitor row | Open the monitor in the browser (always) |
 | `g` / `G` | First / last row |
 | `r` | Refresh now |
 | `Tab` | Neighbouring bar panel |
 | `Esc` | Close |
 
-The `incidentAction` setting controls what `Enter`/left click do on an **error** or **performance**
-row: `"agent"` (the default) hands it to your coding agent, `"browser"` opens it on appsignal.com
-like uptime monitors always do. Right click and `o` always mean "open in the browser", whatever the
-setting.
+The `incidentAction` setting controls what `Enter`/left click do on an **error**, **performance** or
+**server** row: `"agent"` (the default) hands it to your coding agent, `"browser"` opens it on
+appsignal.com like uptime monitors always do. Right click and `o` always mean "open in the browser",
+whatever the setting. For a server row that means the app's page — the exact host-metrics URL could
+not be confirmed without an authenticated browser session (see `SPEC.md` "v0.5").
 
 Only the selected app's errors and monitors are shown. Your selection is remembered across panel
 opens (`~/.local/state/omarchy/appsignal/panel.json`); if the saved app is gone, the first one in
@@ -115,8 +119,11 @@ Set them on the widget entry in `~/.config/omarchy/shell.json`:
 |---|---|---|
 | `refreshIntervalSec` | `120` | Seconds between collector runs (min 30) |
 | `incidentsPerApp` | `5` | Open error rows shown per app |
-| `incidentAction` | `agent` | What `Enter`/left click do on an error row: `agent` or `browser` |
+| `incidentAction` | `agent` | What `Enter`/left click do on an error, performance or server row: `agent` or `browser` |
 | `onlyPinned` | `pinned` | `pinned` shows only the apps you pinned in AppSignal (if you've pinned any); `all` always shows every app |
+| `cpuWarn` | `80` | Host CPU % at or above which a server row's CPU figure (and its warn dot) turns urgent |
+| `memWarn` | `85` | Same, for host memory % (only when AppSignal reports a usable total — see `SPEC.md` "v0.5") |
+| `diskWarn` | `85` | Same, for the fullest disk mountpoint's % |
 
 ### Pinning apps in AppSignal
 
@@ -177,16 +184,18 @@ open exception and performance incidents, uptime monitors with alerts, check-in 
 deploy marker. A monitor counts as down when it carries an alert in `OPEN` or `WARMUP` state.
 
 Second, for apps pinned in AppSignal only (or, with nothing pinned, the first 6 apps — to keep the
-request count bounded), two read-only requests to the
-[metrics API](https://docs.appsignal.com/api/v2/metrics.md) fetch the last hour's health (throughput,
-error rate, mean duration) and the 24h slowest actions. This phase runs in parallel per app with its
-own timeout; if it fails for an app, that app's health line and performance section are simply empty —
-the rest of the overview is unaffected. The exact queries are documented in `SPEC.md` ("v0.4").
+request count bounded), four read-only requests to the
+[metrics API](https://docs.appsignal.com/api/v2/metrics.md) fetch: the last hour's health (throughput,
+error rate, mean duration); the 24h slowest actions, ranked by impact (mean × count) and split into
+web/background; and the last 15 minutes of host metrics (CPU, memory, load, disk — two requests,
+since CPU/memory/swap and disk usage need different tag groupings). This phase runs in parallel per
+app with its own timeout; if any of these fail for an app, that app's health line, performance section
+or servers section is simply empty — the rest of the overview is unaffected. The exact queries, and how
+each host percentage is derived, are documented in `SPEC.md` ("v0.4" and "v0.5").
 
 ## Roadmap
 
 - Check-ins (cron and heartbeat)
-- Host metrics
 - Jobs and alerts
 
 ## Contributing

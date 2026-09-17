@@ -340,36 +340,129 @@ Decisión de Fable el 2026-09-17, basada en la evaluación de Opus con datos rea
 
 # v0.5 — Servers
 
-- Colector, fase 2, por app candidata, un POST más a `metrics/list` (ventana
-  últimos 15 min, `resolution: MINUTELY`, `group_by: [{"Tag":"hostname"}]`):
-  `load_avg` (GAUGE/AVERAGE, tags {hostname:"*"}), `cpu`, `memory`,
-  `disk_usage`, `swap`. OJO: `cpu` y `memory` llevan tag `state`
-  (type_and_tags verificado: cpu → [state, hostname, role, platform, region];
-  disk_usage → [mountpoint, hostname, …]). Sonnet DEBE investigar primero con
-  curl qué valores toma `state` (p. ej. user/system/idle/…; used/available/…),
-  en qué unidad viene cada métrica (¿% o bytes?), y derivar:
-  `cpuPct` (no-idle), `memPct` (usada/total), `load1`, `diskPct` + `diskMount`
-  (el punto de montaje más lleno), `swapPct` (o null). Documentar las consultas
-  exactas en esta sección, con números reales de los hosts
-  178.156.134.200-94c077fa010a (SkillsNT) y 87.99.136.94-c511a0f51603 (CloudHealth).
+## API de métricas — servers, investigación real (2026-09-17)
+
+Verificado con curl contra los mismos dos hosts: `178.156.134.200-94c077fa010a`
+(SkillsNT) y `87.99.136.94-c511a0f51603` (CloudHealth). `type_and_tags`
+confirma: `cpu` → tags `[state, hostname, role, platform, region]`, tipo
+GAUGE; `memory` → mismos tags, GAUGE; `swap` → mismos tags, GAUGE;
+`disk_usage` → `[mountpoint, hostname, role, platform, region]`, GAUGE;
+`load_avg` → `[hostname, role, platform, region]` (sin `state`), GAUGE.
+
+**Valores de `state` encontrados** (`group_by:[{Tag:"hostname"},{Tag:"state"}]`,
+15 min, `AVERAGE`):
+- `cpu`: `user`, `system`, `nice`, `iowait`, `steal`, `idle`, `total_usage`.
+  **`idle` siempre reporta 0.0 en ambos hosts** (el agente no la publica en
+  estos hosts); `total_usage` sí viene poblada y coincide, dentro del margen
+  de redondeo, con `user+system+nice+iowait+steal` (SkillsNT: 2.644+0.753 =
+  3.397 ≈ `total_usage` 3.401; CloudHealth: 10.28+1.125 = 11.405 ≈
+  `total_usage` 11.41). Unidad: **porcentaje** (0–100), no fracción.
+  → **`cpuPct` = el valor de `total_usage` directo**, no hace falta sumar a
+  mano (y sumar sería idéntico salvo que `idle` faltara).
+- `memory`: `used`, `total`, `free`, `usage`, `shmem`. **`total`, `free`,
+  `usage` y `shmem` reportan 0.0 siempre** en los dos hosts — comprobado con
+  `AVERAGE` en ventanas de 15 min, 1h y `MAX` sobre 7 días: `total` nunca deja
+  de ser 0.0. Solo `used` trae dato real (SkillsNT ~1089–1097 MB, CloudHealth
+  ~2160–2164 MB). Unidad de `used`: **megabytes** (valores de esa magnitud
+  son coherentes con RAM real de un contenedor pequeño; un `%` de 1089 no
+  tendría sentido). **No se puede derivar `memPct` (usada/total) en estos dos
+  hosts porque AppSignal nunca publica `total` para ellos** (limitación del
+  agente en despliegues por contenedor, sin `/proc/meminfo` del host físico) —
+  no es un bug del colector. `memPct` queda `null` cuando `total <= 0`;
+  el mecanismo queda listo para cuando un host sí reporte `total`.
+- `swap`: `used`, `total`, `usage`. Mismo patrón: `total` y `usage` en 0.0
+  siempre (MAX sobre 7 días también 0.0) en ambos hosts. `used` sí trae dato:
+  SkillsNT ~512–518 MB, CloudHealth 0.0 MB (esta app no usa swap). Como el
+  roadmap ya contempla `swapPct` nulo, se usa esa vía: `swapPct = null`
+  cuando `total <= 0` (los dos hosts actuales), calculable el día que
+  `total` exista.
+- `disk_usage`: tag es `mountpoint`, no `state`. El valor **ya viene en
+  porcentaje** (SkillsNT: `/` y `/rails/storage` ambos 37.0 — mismo disco
+  montado dos veces; CloudHealth: `/` 35.0). `diskPct` = el mayor entre los
+  mountpoints; `diskMount` = su nombre.
+- `load_avg`: sin tag `state`; un valor por host. SkillsNT 0.017–0.019,
+  CloudHealth 0.107–0.116. Sin unidad (load average estándar de Unix).
+
+**Contraste de sentido común** (motivo de esta investigación): con
+`total_usage` como fuente, SkillsNT sale con CPU ~3.4% y load ~0.02 — un host
+casi ocioso, coherente. CloudHealth CPU ~11.4% y load ~0.11 — también
+coherente (más ocupado que SkillsNT, pero lejos de saturado). Si en vez de
+`total_usage` se hubiera sumado solo `user` mal etiquetado o usado `usage` de
+`memory`/`swap` (que siempre da 0), los números habrían sido absurdos o
+siempre en cero — de ahí la advertencia del roadmap.
+
+**Dos POSTs por app** (no uno): un `group_by` compartido no puede mezclar la
+dimensión `state` (cpu/memory/swap) con `mountpoint` (disk_usage) sin generar
+un producto cruzado confuso (se probó: cada fila queda con un `mountpoint`
+sintético igual al `state`, ej. `mountpoint: "total_usage"`, inofensivo pero
+frágil de parsear). Se separan en dos peticiones, ambas dentro de la misma
+subshell paralela por app:
+
+```json
+// POST 1: cpu + memory (used/total) + swap (used/total/usage) + load_avg
+{
+  "site_id": "<app id>", "from": "<now-15m>", "to": "<now>", "resolution": "MINUTELY",
+  "select": [
+    {"id":"cpu","name":"cpu","tags":{"state":"*","hostname":"*"},"field":"GAUGE","aggregation":"AVERAGE"},
+    {"id":"memUsed","name":"memory","tags":{"state":"used","hostname":"*"},"field":"GAUGE","aggregation":"AVERAGE"},
+    {"id":"memTotal","name":"memory","tags":{"state":"total","hostname":"*"},"field":"GAUGE","aggregation":"AVERAGE"},
+    {"id":"swap","name":"swap","tags":{"state":"*","hostname":"*"},"field":"GAUGE","aggregation":"AVERAGE"},
+    {"id":"load1","name":"load_avg","tags":{"hostname":"*"},"field":"GAUGE","aggregation":"AVERAGE"}
+  ],
+  "group_by": [{"Tag":"hostname"},{"Tag":"state"}], "limit": 100
+}
+// POST 2: disk_usage
+{
+  "site_id": "<app id>", "from": "<now-15m>", "to": "<now>", "resolution": "MINUTELY",
+  "select": [{"id":"disk","name":"disk_usage","tags":{"mountpoint":"*","hostname":"*"},"field":"GAUGE","aggregation":"AVERAGE"}],
+  "group_by": [{"Tag":"hostname"},{"Tag":"mountpoint"}], "limit": 100
+}
+```
+
+Tiempos observados: ~0.7–0.8 s cada POST, ~1.07 s los dos en secuencia por
+app; con 2 apps en paralelo (como health/slowActions), bien dentro de
+`metrics_timeout` (20s).
+
+Ruta del botón "navegador": `host-metrics` y `hosts` bajo `/sites/<id>/`
+devuelven 301 sin sesión autenticada (indistinguible de una ruta inexistente
+sin login real en el navegador), no se pudo confirmar con certeza sin iniciar
+sesión interactiva en appsignal.com — fuera del alcance de esta verificación
+por curl. Por la regla del roadmap ("si no se puede confirmar, usar
+app.url"), clic derecho/`o` en una fila de host abre `app.url`.
+
+## Implementación
+
+- Colector, fase 2, por app candidata, los dos POSTs de arriba (mismo patrón
+  que health/slowActions: timeout propio `metrics_timeout`, fallo de
+  cualquiera de los dos → `hosts: []` para esa app, el resto del overview
+  sigue `ready`).
+- Por host: `cpuPct` = `total_usage`; `memPct` = `memUsed/memTotal*100`
+  redondeado si `memTotal > 0`, si no `null`; `load1` = `load_avg` tal cual;
+  `diskPct`/`diskMount` = el mountpoint con mayor `disk_usage`; `swapPct` =
+  `swapUsed/swapTotal*100` si `swapTotal > 0`, si no `null`.
 - Shape por app: `hosts: [{hostname, shortName, cpuPct, memPct, load1, diskPct,
   diskMount, swapPct, warn: bool}]`. `shortName` = hostname sin el sufijo
-  `-<container id>` si el prefijo es una IP o nombre legible. `warn` si supera
-  umbrales. Fallo de la consulta → `hosts: []`, overview sigue ready.
+  `-<container id>` cuando el prefijo antes del último `-` parece una IP o un
+  nombre legible (con los dos hosts reales: `178.156.134.200-94c077fa010a` →
+  `178.156.134.200`; `87.99.136.94-c511a0f51603` → `87.99.136.94`). `warn` =
+  `cpuPct >= cpuWarn || diskPct >= diskWarn || (memPct != null && memPct >=
+  memWarn)`. Fallo de la consulta → `hosts: []`, overview sigue ready.
 - Settings nuevos (integer): `cpuWarn` 80, `memWarn` 85, `diskWarn` 85.
-- `totals.hostsWarn` por app y global; `attentionNeeded` también se enciende si
-  `hostsWarn > 0` en apps visibles. El punto del tab de la app también.
+- `totals.hostsWarn` por app y global (cuenta de hosts con `warn: true`);
+  `attentionNeeded` también se enciende si `hostsWarn > 0` en apps visibles.
+  El punto del tab de la app también.
 - Panel: sección SERVERS (entre PERFORMANCE y UPTIME). Una fila por host:
   glyph de servidor (mdi-server U+F048B; verificar con od que no quede vacío),
-  shortName, y a la derecha "CPU 3% · MEM 41% · LOAD 0.04 · DISK 62%"; cada
-  métrica sobre umbral en color urgent. Segunda línea dim: hostname completo.
-  Entra al cursor (`kind: "host"`).
+  shortName, y a la derecha "CPU 3% · MEM n/a · LOAD 0.02 · DISK 37%" (cuando
+  `memPct`/`swapPct` son `null` se imprime "n/a", nunca "NaN%" ni se omite la
+  métrica); cada valor sobre umbral en color urgent. Segunda línea dim:
+  hostname completo. Entra al cursor (`kind: "host"`).
 - Acción: Enter/clic izq = agente (respeta `incidentAction`) con prompt:
   "Analyze host <hostname> of app <app> (<env>) in AppSignal: CPU <x>%, memory
   <y>%, load <z>, disk <w>% on <mount>. Use the AppSignal MCP to read host
   metrics over the last 24h and 7d, correlate with throughput, slow actions and
   background jobs, and propose concrete optimizations (right-sizing, memory,
   swap, disk cleanup, process counts). Do not change anything unless I ask."
-  Clic derecho/`o` = navegador a `<app.url>/host-metrics` (verificar la ruta
-  real en appsignal.com; si no se puede confirmar, usar app.url).
+  Cuando `memPct`/`swapPct` son `null`, esas cláusulas se omiten del prompt en
+  vez de decir "null%". Clic derecho/`o` = navegador a `app.url` (ver arriba).
 - manifest version 0.5.0. README actualizado.
