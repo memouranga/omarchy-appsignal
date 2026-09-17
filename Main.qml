@@ -18,6 +18,9 @@ Item {
   readonly property string stateDir: stateHome + "/omarchy/appsignal"
   readonly property string overviewPath: stateDir + "/overview.json"
   readonly property string prefsPath: stateDir + "/panel.json"
+  // v0.7: a flag file that turns dry-run on without touching the shell's
+  // environment (which would need `omarchy restart shell` to pick up).
+  readonly property string dryRunFlagPath: stateDir + "/dry-run"
   readonly property string collectorPath: {
     var url = String(Qt.resolvedUrl("bin/appsignal-collect"))
     return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
@@ -52,6 +55,57 @@ Item {
   function setting(name, fallback) {
     var value = root.settings ? root.settings[name] : undefined
     return value === undefined || value === null ? fallback : value
+  }
+
+  // ------------------------------------------------------------- dry-run
+  //
+  // v0.7 (SPEC.md "Dry-run"): every action that would otherwise run a real
+  // shell command (agent prompt, browser) goes through Panel.qml's single
+  // runAction(cmd), which checks this property. Dry-run is on when either
+  // $OMARCHY_APPSIGNAL_DRY_RUN=1 (read once, at startup — this is an
+  // environment variable, the shell only sees it on launch) or the flag file
+  // below exists, watched live so it can be toggled without a shell restart.
+  readonly property bool dryRunEnv: Quickshell.env("OMARCHY_APPSIGNAL_DRY_RUN") === "1"
+  property bool dryRunFlagPresent: false
+  readonly property bool dryRun: root.dryRunEnv || root.dryRunFlagPresent
+
+  FileView {
+    id: dryRunFlagFile
+    path: root.dryRunFlagPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.dryRunFlagPresent = true
+    onLoadFailed: root.dryRunFlagPresent = false
+  }
+
+  // ------------------------------------------------------------ sections
+  //
+  // v0.7: which sections are visible and in what order. Comma list, read
+  // left to right; unknown keys are dropped and duplicates collapsed to
+  // their first occurrence. Falls back to every section, in the shipped
+  // order, when the setting is empty or ends up with nothing valid in it.
+  readonly property var validSections: ["alerts", "errors", "performance", "servers", "uptime", "jobs", "checkins", "deploy"]
+  readonly property var defaultSectionOrder: root.validSections.slice()
+  readonly property var sectionOrder: {
+    var raw = String(setting("sections", root.defaultSectionOrder.join(",")) || "")
+    var parts = raw.split(",")
+    var out = []
+    for (var i = 0; i < parts.length; i++) {
+      var key = parts[i].trim().toLowerCase()
+      if (key === "") continue
+      if (root.validSections.indexOf(key) < 0) continue
+      if (out.indexOf(key) >= 0) continue
+      out.push(key)
+    }
+    return out.length > 0 ? out : root.defaultSectionOrder
+  }
+
+  // v0.7: order of the app tabs. "attention" (default) = apps with something
+  // wrong first, as before; "name" = alphabetical, stable; "pinned" = the
+  // order AppSignal itself returns (no client-side sort at all).
+  readonly property string appOrderSetting: {
+    var v = String(setting("appOrder", "attention") || "attention").toLowerCase()
+    return (v === "name" || v === "pinned") ? v : "attention"
   }
 
   // ------------------------------------------------------------- refresh
@@ -124,12 +178,24 @@ Item {
                              "-mem-warn", String(root.memWarn),
                              "-disk-warn", String(root.diskWarn),
                              "-queue-time-warn", String(root.queueTimeWarn),
-                             "-ignore-queues", root.ignoreQueues]
+                             "-ignore-queues", root.ignoreQueues,
+                             // v0.7: sections the panel isn't showing don't need
+                             // their phase-2 metrics request either.
+                             "-sections", root.sectionOrder.join(",")]
     updateProcess.running = true
   }
 
   function refreshNow() { root.lastRunMs = 0; root.runUpdate() }
-  function refreshOnOpen() { root.runUpdate() }
+  // v0.7: also re-stat the dry-run flag file on every open. watchChanges on a
+  // FileView tracks *content* changes to a file that already existed when the
+  // watch was set up; it does not reliably notice the file appearing or
+  // disappearing afterward (confirmed by hand: touching or rm'ing the flag
+  // while the shell kept running did not flip dryRunFlagPresent — only a
+  // fresh reload() or a shell restart did). Doing it here means the one
+  // moment SPEC.md actually cares about — opening the panel to check for
+  // "DRY RUN" before pressing Enter/o on a row — is always accurate, with no
+  // shell restart required.
+  function refreshOnOpen() { root.runUpdate(); dryRunFlagFile.reload() }
 
   // ------------------------------------------------------------ derived
 
@@ -210,7 +276,19 @@ Item {
         })
       }
     }
-    out.sort(function(x, y) { return root.attention(y) - root.attention(x) })
+    // v0.7: "pinned" keeps organizations[].apps[] exactly as the API returned
+    // them (no sort at all); "name" and "attention" (default) both need a
+    // stable sort, which Array.prototype.sort has guaranteed since ES2019.
+    if (root.appOrderSetting === "name") {
+      out.sort(function(x, y) {
+        var xn = x.name.toLowerCase(), yn = y.name.toLowerCase()
+        if (xn < yn) return -1
+        if (xn > yn) return 1
+        return 0
+      })
+    } else if (root.appOrderSetting === "attention") {
+      out.sort(function(x, y) { return root.attention(y) - root.attention(x) })
+    }
     return out
   }
 

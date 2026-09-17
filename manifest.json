@@ -35,7 +35,9 @@
       "memWarn": 85,
       "diskWarn": 85,
       "queueTimeWarn": 30000,
-      "ignoreQueues": ""
+      "ignoreQueues": "",
+      "sections": "alerts,errors,performance,servers,uptime,jobs,checkins,deploy",
+      "appOrder": "attention"
     },
     "schema": [
       {
@@ -114,6 +116,21 @@
         "label": "Job queues to ignore",
         "defaultValue": "",
         "description": "Comma-separated queue names the JOBS section leaves out entirely, e.g. \"mailers, low_priority\". Empty shows every queue."
+      },
+      {
+        "key": "sections",
+        "type": "string",
+        "label": "Visible sections, in order",
+        "defaultValue": "alerts,errors,performance,servers,uptime,jobs,checkins,deploy",
+        "description": "Comma-separated section keys, in the order you want them on screen: alerts, errors, performance, servers, uptime, jobs, checkins, deploy. Leaving one out hides it; for performance, servers and jobs that also skips their request to the AppSignal metrics API. Unknown keys are ignored."
+      },
+      {
+        "key": "appOrder",
+        "type": "enum",
+        "label": "App tab order",
+        "options": ["attention", "name", "pinned"],
+        "defaultValue": "attention",
+        "description": "\"attention\" (default) puts apps with something wrong first; \"name\" is alphabetical; \"pinned\" keeps the order AppSignal itself returns, unsorted."
       }
     ]
   }

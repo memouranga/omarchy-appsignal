@@ -25,6 +25,12 @@ mem_warn=85
 disk_warn=85
 queue_time_warn=30000
 ignore_queues=""
+# v0.7: comma-separated section keys the panel is actually showing (the
+# `sections` setting, forwarded as-is). Only three of them gate a phase 2
+# request bucket — see sections_has() below — the rest (alerts, errors,
+# uptime, checkins, deploy) are cheap fields already inside the one phase 1
+# GraphQL call and are never worth splitting out.
+sections="alerts,errors,performance,servers,uptime,jobs,checkins,deploy"
 
 # v0.6: a queue whose *floor* wait (the quietest minute of the window) is still
 # this long is not running anything "now" — every job in it was deliberately
@@ -44,6 +50,9 @@ Usage: appsignal-collect [options]
   -disk-warn PCT          Host disk % warn threshold (default: 85)
   -queue-time-warn MS     Job queue wait time warn threshold, ms (default: 30000)
   -ignore-queues LIST     Comma-separated queue names to leave out (default: none)
+  -sections LIST          Comma-separated enabled section keys (default: all);
+                          skips the phase 2 request for performance/servers/jobs
+                          when that key is missing
 USAGE
 }
 
@@ -58,6 +67,7 @@ while (($#)); do
     -disk-warn|--disk-warn) disk_warn=$2; shift 2 ;;
     -queue-time-warn|--queue-time-warn) queue_time_warn=$2; shift 2 ;;
     -ignore-queues|--ignore-queues) ignore_queues=$2; shift 2 ;;
+    -sections|--sections) sections=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "appsignal-collect: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -74,6 +84,13 @@ done
 # dropped, so a trailing comma or a blank setting is harmless.
 ignore_queues_json=$(jq -n --arg raw "$ignore_queues" \
   '[$raw | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(. != "")]')
+
+# v0.7: same normalize-then-test shape as ignore_queues_json above, plus a
+# membership check. An empty/malformed -sections falls back to "every
+# section on" rather than silently requesting nothing.
+sections_norm=",$(printf '%s' "$sections" | tr -d '[:space:]'),"
+[[ $sections_norm == "," ]] && sections_norm=",alerts,errors,performance,servers,uptime,jobs,checkins,deploy,"
+sections_has() { [[ $sections_norm == *",$1,"* ]]; }
 
 for tool in curl jq; do
   command -v "$tool" >/dev/null 2>&1 || { echo "appsignal-collect: $tool is required" >&2; exit 1; }
@@ -496,64 +513,73 @@ fetch_phase2_app() {
   to15=$to1
   from15=$(minutes_ago_utc 15)
 
-  health_body=$(jq -n --arg site "$app_id" --arg from "$from1" --arg to "$to1" '
-    {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
-     select:[
-       {id:"throughput", name:"site_throughput", tags:{}, field:"COUNTER", aggregation:"SUM"},
-       {id:"errorRate", name:"error_rate", tags:{namespace:"web"}, field:"GAUGE", aggregation:"AVERAGE"},
-       {id:"meanMs", name:"transaction_duration", tags:{namespace:"web"}, field:"MEAN", aggregation:"AVERAGE"}
-     ],
-     group_by:["Name"], limit:10}')
+  # v0.7: "performance" off means neither the slow-action ranking nor the
+  # 1h health line (throughput/error rate/mean duration) that PERFORMANCE and
+  # the health line share this one phase 2 request pair for — both come from
+  # the same metrics call, so there is nothing useful left to fetch here.
+  if sections_has "performance"; then
+    health_body=$(jq -n --arg site "$app_id" --arg from "$from1" --arg to "$to1" '
+      {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
+       select:[
+         {id:"throughput", name:"site_throughput", tags:{}, field:"COUNTER", aggregation:"SUM"},
+         {id:"errorRate", name:"error_rate", tags:{namespace:"web"}, field:"GAUGE", aggregation:"AVERAGE"},
+         {id:"meanMs", name:"transaction_duration", tags:{namespace:"web"}, field:"MEAN", aggregation:"AVERAGE"}
+       ],
+       group_by:["Name"], limit:10}')
 
-  # v0.4.1: ask for a deep limit (>=200) so the impact ranking below (totalMs =
-  # meanMs * count) is computed over the real 24h action set, not just a
-  # top-100-by-mean that can hide high-volume, high-impact actions.
-  slow_body=$(jq -n --arg site "$app_id" --arg from "$from24" --arg to "$to24" '
-    {site_id:$site, from:$from, to:$to, resolution:"HOURLY",
-     select:[
-       {id:"meanMs", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"MEAN", aggregation:"AVERAGE"},
-       {id:"count", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"COUNT", aggregation:"SUM"}
-     ],
-     group_by:[{Tag:"action"}, {Tag:"namespace"}], limit:200}')
+    # v0.4.1: ask for a deep limit (>=200) so the impact ranking below (totalMs =
+    # meanMs * count) is computed over the real 24h action set, not just a
+    # top-100-by-mean that can hide high-volume, high-impact actions.
+    slow_body=$(jq -n --arg site "$app_id" --arg from "$from24" --arg to "$to24" '
+      {site_id:$site, from:$from, to:$to, resolution:"HOURLY",
+       select:[
+         {id:"meanMs", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"MEAN", aggregation:"AVERAGE"},
+         {id:"count", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"COUNT", aggregation:"SUM"}
+       ],
+       group_by:[{Tag:"action"}, {Tag:"namespace"}], limit:200}')
 
-  hc=$(curl -sS --max-time "$metrics_timeout" \
-    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    -X POST "$METRICS_ENDPOINT" -d "$health_body" -o "$health_out.raw" -w '%{http_code}' 2>/dev/null) || hc=000
-  sc=$(curl -sS --max-time "$metrics_timeout" \
-    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    -X POST "$METRICS_ENDPOINT" -d "$slow_body" -o "$slow_out.raw" -w '%{http_code}' 2>/dev/null) || sc=000
+    hc=$(curl -sS --max-time "$metrics_timeout" \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      -X POST "$METRICS_ENDPOINT" -d "$health_body" -o "$health_out.raw" -w '%{http_code}' 2>/dev/null) || hc=000
+    sc=$(curl -sS --max-time "$metrics_timeout" \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      -X POST "$METRICS_ENDPOINT" -d "$slow_body" -o "$slow_out.raw" -w '%{http_code}' 2>/dev/null) || sc=000
 
-  if [[ $hc == 200 ]] && jq -e '.rows and (.error | not)' "$health_out.raw" >/dev/null 2>&1; then
-    jq '
-      ([.rows[].data] | add // {}) as $d
-      | if ($d.throughput == null and $d.errorRate == null and $d.meanMs == null) then null
-        else { throughput: $d.throughput, errorRate: $d.errorRate, meanMs: $d.meanMs, window: "1h" }
-        end
-    ' "$health_out.raw" > "$health_out" 2>/dev/null || echo null > "$health_out"
+    if [[ $hc == 200 ]] && jq -e '.rows and (.error | not)' "$health_out.raw" >/dev/null 2>&1; then
+      jq '
+        ([.rows[].data] | add // {}) as $d
+        | if ($d.throughput == null and $d.errorRate == null and $d.meanMs == null) then null
+          else { throughput: $d.throughput, errorRate: $d.errorRate, meanMs: $d.meanMs, window: "1h" }
+          end
+      ' "$health_out.raw" > "$health_out" 2>/dev/null || echo null > "$health_out"
+    else
+      echo null > "$health_out"
+    fi
+
+    # v0.4.1: rank by impact (totalMs = meanMs * count), not by mean alone — a
+    # 59s job that ran once and a 5ms action that ran 100k times both looked
+    # "slow" under the old mean-only sort, but only one of them matters. Split
+    # into slowWeb (namespace "web") and slowBackground (everything else, e.g.
+    # background jobs), each independently ranked and capped at N = floor
+    # (incidentsPerApp / 2) + 1 rows (default incidentsPerApp 5 -> 3 rows/group).
+    if [[ $sc == 200 ]] && jq -e '.rows and (.error | not)' "$slow_out.raw" >/dev/null 2>&1; then
+      jq --argjson limit "$limit" '
+        ( ($limit / 2 | floor) + 1 ) as $n
+        | [ (.rows // [])[]
+            | select(.data.meanMs != null)
+            | { action: (.group.action // ""), namespace: (.group.namespace // ""),
+                meanMs: (.data.meanMs // 0), count: (.data.count // 0),
+                totalMs: ((.data.meanMs // 0) * (.data.count // 0)) }
+          ] as $all
+        | ($all | map(select(.namespace == "web")) | sort_by(-.totalMs) | .[0:$n]) as $web
+        | ($all | map(select(.namespace != "web")) | sort_by(-.totalMs) | .[0:$n]) as $bg
+        | { slowWeb: $web, slowBackground: $bg, slowActions: ($web + $bg) }
+      ' "$slow_out.raw" > "$slow_out" 2>/dev/null || echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}' > "$slow_out"
+    else
+      echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}' > "$slow_out"
+    fi
   else
     echo null > "$health_out"
-  fi
-
-  # v0.4.1: rank by impact (totalMs = meanMs * count), not by mean alone — a
-  # 59s job that ran once and a 5ms action that ran 100k times both looked
-  # "slow" under the old mean-only sort, but only one of them matters. Split
-  # into slowWeb (namespace "web") and slowBackground (everything else, e.g.
-  # background jobs), each independently ranked and capped at N = floor
-  # (incidentsPerApp / 2) + 1 rows (default incidentsPerApp 5 -> 3 rows/group).
-  if [[ $sc == 200 ]] && jq -e '.rows and (.error | not)' "$slow_out.raw" >/dev/null 2>&1; then
-    jq --argjson limit "$limit" '
-      ( ($limit / 2 | floor) + 1 ) as $n
-      | [ (.rows // [])[]
-          | select(.data.meanMs != null)
-          | { action: (.group.action // ""), namespace: (.group.namespace // ""),
-              meanMs: (.data.meanMs // 0), count: (.data.count // 0),
-              totalMs: ((.data.meanMs // 0) * (.data.count // 0)) }
-        ] as $all
-      | ($all | map(select(.namespace == "web")) | sort_by(-.totalMs) | .[0:$n]) as $web
-      | ($all | map(select(.namespace != "web")) | sort_by(-.totalMs) | .[0:$n]) as $bg
-      | { slowWeb: $web, slowBackground: $bg, slowActions: ($web + $bg) }
-    ' "$slow_out.raw" > "$slow_out" 2>/dev/null || echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}' > "$slow_out"
-  else
     echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}' > "$slow_out"
   fi
 
@@ -569,6 +595,9 @@ fetch_phase2_app() {
   # as memUsedMb/swapUsedMb so the panel can still show real memory.
   local hm_body disk_body hmc dc
 
+  if ! sections_has "servers"; then
+    echo '[]' > "$hosts_out"
+  else
   hm_body=$(jq -n --arg site "$app_id" --arg from "$from15" --arg to "$to15" '
     {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
      select:[
@@ -652,6 +681,7 @@ fetch_phase2_app() {
   else
     echo '[]' > "$hosts_out"
   fi
+  fi
 
   # ------------------------------------------------------------- v0.6: jobs
   #
@@ -678,6 +708,9 @@ fetch_phase2_app() {
   # See SPEC.md "v0.6" for the full distribution table.
   local jobs_body jc
 
+  if ! sections_has "jobs"; then
+    echo '[]' > "$jobs_out"
+  else
   jobs_body=$(jq -n --arg site "$app_id" --arg from "$from1" --arg to "$to1" '
     {site_id:$site, from:$from, to:$to, resolution:"MINUTELY",
      select:[
@@ -723,6 +756,7 @@ fetch_phase2_app() {
     ' "$jobs_out.raw" > "$jobs_out" 2>/dev/null || echo '[]' > "$jobs_out"
   else
     echo '[]' > "$jobs_out"
+  fi
   fi
 }
 

@@ -42,6 +42,12 @@ Panel {
 
   readonly property var apps: root.asList(data.apps)
 
+  // v0.7: which sections are on and in what order — the single source of
+  // truth for both focusRows below and the section Loader in the selected-
+  // app column further down. Crosses the `var` property boundary from Main,
+  // hence asList() (see asList()'s own comment).
+  readonly property var sectionOrder: root.asList(data.sectionOrder)
+
   // Mirrored onto the root: inside a Button delegate `data` resolves to the
   // item's own default property, not this file's Main instance (same reason
   // dev.git mirrors pinnedKind).
@@ -62,52 +68,71 @@ Panel {
   }
 
   // Only the selected app's rows are ever on screen, so this is the one list
-  // j/k walks: every error row followed by every monitor row of that app.
+  // j/k walks: every row of every visible section, in root.sectionOrder.
+  //
+  // v0.7: order used to be fixed (alerts, errors, perf, hosts, monitors,
+  // queues, check-ins); now it follows root.sectionOrder (the `sections`
+  // setting) so a reordered or narrowed panel still gets a matching cursor
+  // order. appSection.flatOffset() in the selected-app column below walks
+  // the same root.sectionOrder to compute each row's starting index — the
+  // two must never disagree, or Enter/o would act on the wrong row.
   readonly property var focusRows: {
     var rows = []
     var app = root.selectedApp
     if (!app) return rows
-    // ALERTS (v0.6): most urgent, sits above everything else. Right-click/`o`
-    // always opens app.url (no confirmed per-trigger route — see SPEC.md).
-    var alerts = root.asList(app.alerts)
-    for (var a = 0; a < alerts.length; a++)
-      rows.push({ kind: "alert", app: app, item: alerts[a], url: alerts[a].url })
-    var errs = root.asList(app.errors)
-    for (var j = 0; j < errs.length; j++)
-      rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
-    // PERFORMANCE: open incidents take priority (rare — AppSignal auto-closes
-    // them); with none open, fall back to the two 24h impact-ranked lists the
-    // collector's metrics phase computed (web first, then background). Never
-    // both perf incidents and slow-action rows at once.
-    var perf = root.asList(app.perf)
-    if (perf.length > 0) {
-      for (var p = 0; p < perf.length; p++)
-        rows.push({ kind: "perf", app: app, item: perf[p], url: perf[p].url })
-    } else {
-      var slowWeb = root.asList(app.slowWeb)
-      for (var sw = 0; sw < slowWeb.length; sw++)
-        rows.push({ kind: "slow", app: app, item: slowWeb[sw], url: app.perfUrl })
-      var slowBg = root.asList(app.slowBackground)
-      for (var sb = 0; sb < slowBg.length; sb++)
-        rows.push({ kind: "slow", app: app, item: slowBg[sb], url: app.perfUrl })
+    var order = root.sectionOrder
+    for (var s = 0; s < order.length; s++) {
+      var key = order[s]
+      if (key === "alerts") {
+        // ALERTS (v0.6): right-click/`o` always opens app.url (no confirmed
+        // per-trigger route — see SPEC.md).
+        var alerts = root.asList(app.alerts)
+        for (var a = 0; a < alerts.length; a++)
+          rows.push({ kind: "alert", app: app, item: alerts[a], url: alerts[a].url })
+      } else if (key === "errors") {
+        var errs = root.asList(app.errors)
+        for (var j = 0; j < errs.length; j++)
+          rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
+      } else if (key === "performance") {
+        // Open incidents take priority (rare — AppSignal auto-closes them);
+        // with none open, fall back to the two 24h impact-ranked lists the
+        // collector's metrics phase computed (web first, then background).
+        // Never both perf incidents and slow-action rows at once.
+        var perf = root.asList(app.perf)
+        if (perf.length > 0) {
+          for (var p = 0; p < perf.length; p++)
+            rows.push({ kind: "perf", app: app, item: perf[p], url: perf[p].url })
+        } else {
+          var slowWeb = root.asList(app.slowWeb)
+          for (var sw = 0; sw < slowWeb.length; sw++)
+            rows.push({ kind: "slow", app: app, item: slowWeb[sw], url: app.perfUrl })
+          var slowBg = root.asList(app.slowBackground)
+          for (var sb = 0; sb < slowBg.length; sb++)
+            rows.push({ kind: "slow", app: app, item: slowBg[sb], url: app.perfUrl })
+        }
+      } else if (key === "servers") {
+        // SERVERS (v0.5): right-click/`o` always opens app.url (the real
+        // host-metrics route could not be confirmed — see SPEC.md).
+        var hosts = root.asList(app.hosts)
+        for (var h = 0; h < hosts.length; h++)
+          rows.push({ kind: "host", app: app, item: hosts[h], url: app.url })
+      } else if (key === "uptime") {
+        var mons = root.asList(app.monitors)
+        for (var k = 0; k < mons.length; k++)
+          rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
+      } else if (key === "jobs") {
+        // JOBS (v0.6): right-click/`o` opens app.url.
+        var queues = root.asList(app.queues)
+        for (var q = 0; q < queues.length; q++)
+          rows.push({ kind: "queue", app: app, item: queues[q], url: app.url })
+      } else if (key === "checkins") {
+        // CHECK-INS (v0.6): always the browser, never the agent.
+        var checkIns = root.asList(app.checkIns)
+        for (var c = 0; c < checkIns.length; c++)
+          rows.push({ kind: "checkin", app: app, item: checkIns[c], url: checkIns[c].url })
+      }
+      // "deploy" is a footer line, not a cursor row.
     }
-    // SERVERS (v0.5): sits between PERFORMANCE and UPTIME. Right-click/`o`
-    // always opens app.url (the real host-metrics route could not be
-    // confirmed without an authenticated browser session; see SPEC.md).
-    var hosts = root.asList(app.hosts)
-    for (var h = 0; h < hosts.length; h++)
-      rows.push({ kind: "host", app: app, item: hosts[h], url: app.url })
-    var mons = root.asList(app.monitors)
-    for (var k = 0; k < mons.length; k++)
-      rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
-    // JOBS (v0.6): after UPTIME. Right-click/`o` opens app.url.
-    var queues = root.asList(app.queues)
-    for (var q = 0; q < queues.length; q++)
-      rows.push({ kind: "queue", app: app, item: queues[q], url: app.url })
-    // CHECK-INS (v0.6): after JOBS. Always the browser, never the agent.
-    var checkIns = root.asList(app.checkIns)
-    for (var c = 0; c < checkIns.length; c++)
-      rows.push({ kind: "checkin", app: app, item: checkIns[c], url: checkIns[c].url })
     return rows
   }
 
@@ -329,6 +354,22 @@ Panel {
     root.openUrl(row.url)
   }
 
+  // v0.7 (SPEC.md "Dry-run"): the one and only place that runs a real shell
+  // command. Every other function in this file that used to run one
+  // directly on the bar (agent prompt, browser) now calls this instead. In
+  // dry-run — $OMARCHY_APPSIGNAL_DRY_RUN=1, or the flag file at
+  // ~/.local/state/omarchy/appsignal/dry-run — the command is only logged,
+  // never executed, and the panel's hero shows "DRY RUN" (see heroMeta())
+  // so a tester can confirm it's safe before pressing Enter/o on a row.
+  function runAction(cmd) {
+    if (!root.bar) return
+    if (data.dryRun) {
+      console.log("memong.appsignal DRY-RUN:", cmd)
+      return
+    }
+    root.bar.run(cmd)
+  }
+
   // Builds the one-line prompt from SPEC.md and hands it to the user's
   // default coding agent in a new terminal (same as `omarchy agent crash`),
   // then closes the panel. Empty fields (namespace, action, count, message,
@@ -359,7 +400,7 @@ Panel {
       "samples; explain the probable root cause and propose a fix. Do not change the " +
       "incident state or severity unless I ask.")
 
-    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
     root.close()
   }
 
@@ -405,7 +446,7 @@ Panel {
     parts.push("Use the AppSignal MCP to inspect performance samples and span breakdowns; find the " +
       "bottleneck and propose optimizations. Do not change anything in AppSignal unless I ask.")
 
-    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
     root.close()
   }
 
@@ -442,7 +483,7 @@ Panel {
       "throughput, slow actions and background jobs, and propose concrete optimizations (right-sizing, " +
       "memory, swap, disk cleanup, process counts). Do not change anything unless I ask.")
 
-    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
     root.close()
   }
 
@@ -477,7 +518,7 @@ Panel {
     parts.push("Use the AppSignal MCP to inspect the trigger and recent metric data; explain what is " +
       "driving it and whether it needs action. Do not change the trigger or acknowledge the alert unless I ask.")
 
-    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
     root.close()
   }
 
@@ -503,7 +544,7 @@ Panel {
     parts.push("Use the AppSignal MCP to inspect throughput, queue time and the slowest jobs in this queue; " +
       "propose fixes. Do not change anything unless I ask.")
 
-    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
     root.close()
   }
 
@@ -570,10 +611,17 @@ Panel {
   }
 
   function heroMeta() {
-    if (data.loading) return "REFRESHING…"
-    var ago = root.timeAgo(data.updatedAt, root.nowMs)
-    var when = ago === "" || ago === "just now" ? "JUST NOW" : ago.toUpperCase() + " AGO"
-    return (data.stale ? "STALE · FROM " : "UPDATED ") + when
+    var base
+    if (data.loading) {
+      base = "REFRESHING…"
+    } else {
+      var ago = root.timeAgo(data.updatedAt, root.nowMs)
+      var when = ago === "" || ago === "just now" ? "JUST NOW" : ago.toUpperCase() + " AGO"
+      base = (data.stale ? "STALE · FROM " : "UPDATED ") + when
+    }
+    // v0.7: visible proof dry-run is on, right next to "UPDATED …" — a
+    // tester must see this before pressing Enter/o on a row (SPEC.md).
+    return data.dryRun ? base + "  ·  DRY RUN" : base
   }
 
   function heroIdentity() {
@@ -718,7 +766,7 @@ Panel {
 
   function openUrl(url) {
     if (!url || !root.bar) return
-    root.bar.run("omarchy launch browser " + Util.shellQuote(url))
+    root.runAction("omarchy launch browser " + Util.shellQuote(url))
     root.close()
   }
 
@@ -1055,8 +1103,6 @@ Panel {
             spacing: Style.space(8)
 
             readonly property var app: root.selectedApp || ({})
-            // v0.6: ALERTS sits above everything else, so every other
-            // section's flat-index offset shifts by its length.
             readonly property var alerts: root.asList(appSection.app.alerts)
             readonly property var errs: root.asList(appSection.app.errors)
             readonly property var mons: root.asList(appSection.app.monitors)
@@ -1066,22 +1112,70 @@ Panel {
             // performance incident.
             readonly property var slowWeb: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowWeb)
             readonly property var slowBackground: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowBackground)
-            // Where the PERFORMANCE rows (perf incidents, or their slow-action
-            // fallback: web rows then background rows) sit in focusRows: right
-            // after the alert and error rows.
             readonly property int perfRowCount: appSection.perfIncidents.length > 0
               ? appSection.perfIncidents.length
               : (appSection.slowWeb.length + appSection.slowBackground.length)
-            // v0.5: SERVERS sits between PERFORMANCE and UPTIME.
             readonly property var hosts: root.asList(appSection.app.hosts)
-            readonly property int errsFlatOffset: appSection.alerts.length
-            readonly property int hostsFlatOffset: appSection.errsFlatOffset + appSection.errs.length + appSection.perfRowCount
-            readonly property int monitorFlatOffset: appSection.hostsFlatOffset + appSection.hosts.length
-            // v0.6: JOBS and CHECK-INS sit after UPTIME, in that order.
             readonly property var queues: root.asList(appSection.app.queues)
-            readonly property int queuesFlatOffset: appSection.monitorFlatOffset + appSection.mons.length
             readonly property var checkIns: root.asList(appSection.app.checkIns)
-            readonly property int checkInsFlatOffset: appSection.queuesFlatOffset + appSection.queues.length
+
+            // v0.7: the row cursor's flat index no longer assumes a fixed
+            // section order — `sections` can reorder or drop any of them.
+            // rowCounts is keyed exactly like the `sections` setting, so
+            // flatOffset() can walk root.sectionOrder (the same list
+            // root.focusRows walks, up in Panel's own scope) and sum what
+            // comes before whichever section asks. The two must never
+            // disagree, or Enter/o would act on the wrong row.
+            readonly property var rowCounts: ({
+              alerts: appSection.alerts.length,
+              errors: appSection.errs.length,
+              performance: appSection.perfRowCount,
+              servers: appSection.hosts.length,
+              uptime: appSection.mons.length,
+              jobs: appSection.queues.length,
+              checkins: appSection.checkIns.length
+            })
+            function flatOffset(key) {
+              var order = root.sectionOrder
+              var offset = 0
+              for (var i = 0; i < order.length; i++) {
+                if (order[i] === key) return offset
+                offset += Number(appSection.rowCounts[order[i]] || 0)
+              }
+              return offset
+            }
+
+            // Whether a section has anything to show — the same conditions
+            // the old fixed-order Columns used, just addressable by key now
+            // that a Loader (not a literal child) decides what renders.
+            function sectionVisible(key) {
+              switch (key) {
+                case "alerts": return appSection.alerts.length > 0
+                case "errors": return true
+                case "performance": return appSection.perfIncidents.length > 0 ||
+                  appSection.slowWeb.length > 0 || appSection.slowBackground.length > 0
+                case "servers": return appSection.hosts.length > 0
+                case "uptime": return appSection.mons.length > 0
+                case "jobs": return appSection.queues.length > 0
+                case "checkins": return appSection.checkIns.length > 0
+                case "deploy": return root.deployLine(appSection.app) !== ""
+                default: return false
+              }
+            }
+
+            function sectionComponent(key) {
+              switch (key) {
+                case "alerts": return appSection.alertsSectionComponent
+                case "errors": return appSection.errorsSectionComponent
+                case "performance": return appSection.performanceSectionComponent
+                case "servers": return appSection.serversSectionComponent
+                case "uptime": return appSection.uptimeSectionComponent
+                case "jobs": return appSection.jobsSectionComponent
+                case "checkins": return appSection.checkinsSectionComponent
+                case "deploy": return appSection.deploySectionComponent
+                default: return null
+              }
+            }
 
             PanelSeparator { foreground: root.foreground }
 
@@ -1148,284 +1242,314 @@ Panel {
               elide: Text.ElideRight
             }
 
-            // ---- Alerts ---- (v0.6, above everything: the most urgent thing
-            // an app can be showing. Hidden when there are none — today that
-            // is every app, since this tenant has 0 triggers configured.)
-            Column {
-              width: parent.width
-              visible: appSection.alerts.length > 0
-              spacing: Style.space(6)
+            // ---- Sections ---- (v0.7)
+            //
+            // Each of the eight sections below is a named Component held as a
+            // property of appSection, so it keeps normal lexical access to
+            // appSection.* and root.* (an anonymous Component assigned to a
+            // property keeps the enclosing document's id scope; the file's
+            // other `component Name: Type {}` declarations, used for row
+            // delegates below, deliberately do not — see their own comments).
+            // The Repeater/Loader pair at the bottom instantiates whichever of
+            // these root.sectionOrder names, in that order — this is what
+            // lets the `sections` setting reorder or drop any of them without
+            // the row cursor (flatOffset() above, root.focusRows) losing sync.
+            //
+            // ALERTS (v0.6): the most urgent thing an app can be showing.
+            // Hidden when there are none — today that is every app, since
+            // this tenant has 0 triggers configured.
+            property Component alertsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "ALERTS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "ALERTS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
 
-              Repeater {
-                model: appSection.alerts
+                Repeater {
+                  model: appSection.alerts
 
-                AlertRow {
-                  required property var modelData
-                  required property int index
+                  AlertRow {
+                    required property var modelData
+                    required property int index
 
-                  width: appSection.width
-                  alert: modelData
-                  flatIndex: index
+                    width: appSection.width
+                    alert: modelData
+                    flatIndex: appSection.flatOffset("alerts") + index
+                  }
                 }
               }
             }
 
-            // ---- Open errors ----
-            Column {
-              width: parent.width
-              spacing: Style.space(6)
+            property Component errorsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "OPEN ERRORS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "OPEN ERRORS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
 
-              Text {
-                visible: appSection.errs.length === 0
-                width: parent.width
-                text: "No open errors"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
+                Text {
+                  visible: appSection.errs.length === 0
+                  width: parent.width
+                  text: "No open errors"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
 
-              Repeater {
-                model: appSection.errs
+                Repeater {
+                  model: appSection.errs
 
-                ErrorRow {
-                  required property var modelData
-                  required property int index
+                  ErrorRow {
+                    required property var modelData
+                    required property int index
 
-                  width: appSection.width
-                  err: modelData
-                  flatIndex: appSection.errsFlatOffset + index
+                    width: appSection.width
+                    err: modelData
+                    flatIndex: appSection.flatOffset("errors") + index
+                  }
                 }
               }
             }
 
-            // ---- Performance ----
             // Open performance incidents when there are any (AppSignal auto-
             // closes these, so it is rare); otherwise two 24h impact-ranked
             // lists (WEB, BACKGROUND) the collector's metrics phase computed.
-            // Hidden entirely when none of the three exists.
-            Column {
-              width: parent.width
-              visible: appSection.perfIncidents.length > 0 || appSection.slowWeb.length > 0 || appSection.slowBackground.length > 0
-              spacing: Style.space(6)
-
-              PanelSectionHeader {
-                width: parent.width
-                text: "PERFORMANCE"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              Repeater {
-                model: appSection.perfIncidents
-
-                PerfRow {
-                  required property var modelData
-                  required property int index
-
-                  width: appSection.width
-                  perf: modelData
-                  flatIndex: appSection.errsFlatOffset + appSection.errs.length + index
-                }
-              }
-
-              // WEB · 24H
+            property Component performanceSectionComponent: Component {
               Column {
-                width: parent.width
-                visible: appSection.perfIncidents.length === 0 && appSection.slowWeb.length > 0
+                width: appSection.width
                 spacing: Style.space(6)
 
-                Text {
+                PanelSectionHeader {
                   width: parent.width
-                  text: "WEB · 24H"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  font.letterSpacing: 1.2
+                  text: "PERFORMANCE"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
                 }
 
                 Repeater {
-                  model: appSection.slowWeb
+                  model: appSection.perfIncidents
 
-                  SlowActionRow {
+                  PerfRow {
                     required property var modelData
                     required property int index
 
                     width: appSection.width
-                    action: modelData
-                    flatIndex: appSection.errsFlatOffset + appSection.errs.length + index
+                    perf: modelData
+                    flatIndex: appSection.flatOffset("performance") + index
+                  }
+                }
+
+                // WEB · 24H
+                Column {
+                  width: parent.width
+                  visible: appSection.perfIncidents.length === 0 && appSection.slowWeb.length > 0
+                  spacing: Style.space(6)
+
+                  Text {
+                    width: parent.width
+                    text: "WEB · 24H"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.letterSpacing: 1.2
+                  }
+
+                  Repeater {
+                    model: appSection.slowWeb
+
+                    SlowActionRow {
+                      required property var modelData
+                      required property int index
+
+                      width: appSection.width
+                      action: modelData
+                      flatIndex: appSection.flatOffset("performance") + index
+                    }
+                  }
+                }
+
+                // BACKGROUND · 24H
+                Column {
+                  width: parent.width
+                  visible: appSection.perfIncidents.length === 0 && appSection.slowBackground.length > 0
+                  spacing: Style.space(6)
+
+                  Text {
+                    width: parent.width
+                    text: "BACKGROUND · 24H"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.letterSpacing: 1.2
+                  }
+
+                  Repeater {
+                    model: appSection.slowBackground
+
+                    SlowActionRow {
+                      required property var modelData
+                      required property int index
+
+                      width: appSection.width
+                      action: modelData
+                      flatIndex: appSection.flatOffset("performance") + appSection.slowWeb.length + index
+                    }
                   }
                 }
               }
+            }
 
-              // BACKGROUND · 24H
+            property Component serversSectionComponent: Component {
               Column {
-                width: parent.width
-                visible: appSection.perfIncidents.length === 0 && appSection.slowBackground.length > 0
+                width: appSection.width
                 spacing: Style.space(6)
 
-                Text {
+                PanelSectionHeader {
                   width: parent.width
-                  text: "BACKGROUND · 24H"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  font.letterSpacing: 1.2
+                  text: "SERVERS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
                 }
 
                 Repeater {
-                  model: appSection.slowBackground
+                  model: appSection.hosts
 
-                  SlowActionRow {
+                  HostRow {
                     required property var modelData
                     required property int index
 
                     width: appSection.width
-                    action: modelData
-                    flatIndex: appSection.errsFlatOffset + appSection.errs.length + appSection.slowWeb.length + index
+                    host: modelData
+                    flatIndex: appSection.flatOffset("servers") + index
                   }
                 }
               }
             }
 
-            // ---- Servers ----
-            Column {
-              width: parent.width
-              visible: appSection.hosts.length > 0
-              spacing: Style.space(6)
+            property Component uptimeSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "SERVERS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "UPTIME"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
 
-              Repeater {
-                model: appSection.hosts
+                Repeater {
+                  model: appSection.mons
 
-                HostRow {
-                  required property var modelData
-                  required property int index
+                  MonitorRow {
+                    required property var modelData
+                    required property int index
 
-                  width: appSection.width
-                  host: modelData
-                  flatIndex: appSection.hostsFlatOffset + index
+                    width: appSection.width
+                    mon: modelData
+                    flatIndex: appSection.flatOffset("uptime") + index
+                  }
                 }
               }
             }
 
-            // ---- Uptime ----
-            Column {
-              width: parent.width
-              visible: appSection.mons.length > 0
-              spacing: Style.space(6)
+            // JOBS (v0.6, background queues)
+            property Component jobsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "UPTIME"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "JOBS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
 
-              Repeater {
-                model: appSection.mons
+                Repeater {
+                  model: appSection.queues
 
-                MonitorRow {
-                  required property var modelData
-                  required property int index
+                  JobRow {
+                    required property var modelData
+                    required property int index
 
-                  width: appSection.width
-                  mon: modelData
-                  flatIndex: appSection.monitorFlatOffset + index
+                    width: appSection.width
+                    queue: modelData
+                    flatIndex: appSection.flatOffset("jobs") + index
+                  }
                 }
               }
             }
 
-            // ---- Jobs ---- (v0.6, background queues, after UPTIME)
-            Column {
-              width: parent.width
-              visible: appSection.queues.length > 0
-              spacing: Style.space(6)
+            // CHECK-INS (v0.6)
+            property Component checkinsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "JOBS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "CHECK-INS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
 
-              Repeater {
-                model: appSection.queues
+                Repeater {
+                  model: appSection.checkIns
 
-                JobRow {
-                  required property var modelData
-                  required property int index
+                  CheckInRow {
+                    required property var modelData
+                    required property int index
 
-                  width: appSection.width
-                  queue: modelData
-                  flatIndex: appSection.queuesFlatOffset + index
+                    width: appSection.width
+                    checkIn: modelData
+                    flatIndex: appSection.flatOffset("checkins") + index
+                  }
                 }
               }
             }
 
-            // ---- Check-ins ---- (v0.6, after JOBS)
-            Column {
-              width: parent.width
-              visible: appSection.checkIns.length > 0
-              spacing: Style.space(6)
+            property Component deploySectionComponent: Component {
+              Text {
+                width: appSection.width
+                text: root.deployLine(appSection.app)
+                visible: text !== ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "CHECK-INS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              Repeater {
-                model: appSection.checkIns
-
-                CheckInRow {
-                  required property var modelData
-                  required property int index
-
-                  width: appSection.width
-                  checkIn: modelData
-                  flatIndex: appSection.checkInsFlatOffset + index
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openUrl(appSection.app.deploysUrl)
                 }
               }
             }
 
-            // ---- Deploy ----
-            Text {
-              width: parent.width
-              text: root.deployLine(appSection.app)
-              visible: text !== ""
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
+            Repeater {
+              model: root.sectionOrder
 
-              MouseArea {
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.openUrl(appSection.app.deploysUrl)
+              Loader {
+                id: sectionLoader
+                required property string modelData
+
+                width: appSection.width
+                visible: appSection.sectionVisible(modelData)
+                sourceComponent: appSection.sectionComponent(modelData)
               }
             }
           }
