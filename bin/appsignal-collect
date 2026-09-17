@@ -265,7 +265,7 @@ fixture_fetch() {
 }
 
 run_query() {
-  local gql=$1 body
+  local gql=$1 body code
   if [[ -n ${APPSIGNAL_FIXTURE_DIR:-} ]]; then
     # $gql is the query text itself, so it — not some counter — is the
     # reliable way to tell the retry apart from the original call: run_query
@@ -286,10 +286,18 @@ run_query() {
     return
   fi
   body=$(jq -n --arg q "$gql" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}')
-  curl -sS --max-time "$timeout" \
+  # curl already prints "000" through -w when it never got a response, and it
+  # exits non-zero in the same breath. A trailing `|| echo 000` therefore
+  # appended a SECOND "000" to this function's stdout, and the caller read
+  # "000000" — which matches neither the `== 000` unreachable branch nor 200,
+  # so a machine with no network showed "AppSignal returned HTTP 000000."
+  # instead of the unreachable message with curl's own explanation. Capture
+  # the code and default it only when curl printed nothing at all.
+  code=$(curl -sS --max-time "$timeout" \
     -H "Content-Type: application/json" \
     -X POST "$ENDPOINT?token=$token" \
-    -d "$body" -o "$tmp/resp.json" -w '%{http_code}' 2>"$tmp/curl.err" || echo 000
+    -d "$body" -o "$tmp/resp.json" -w '%{http_code}' 2>"$tmp/curl.err")
+  printf '%s' "${code:-000}"
 }
 
 gql_failed() {
@@ -701,7 +709,12 @@ fetch_phase2_app() {
                 + (if ($r.data.swap != null and $r.group.state == "total") then {swapTotalMb: $r.data.swap} else {} end)
                 + (if $r.data.load1 != null then {load1: $r.data.load1} else {} end)
             )) as $agg
-          | ($dRows | map({mountpoint: .group.mountpoint, pct: .data.disk}) | sort_by(-.pct) | (.[0] // null)) as $worstDisk
+          # Tie-break by mountpoint name: two mountpoints on the same
+          # filesystem report the identical percentage, and with only -.pct as
+          # the key the "fullest disk" flipped between refreshes (the order the
+          # API happened to return them in), so the SERVERS row and the agent
+          # prompt named a different mountpoint each time for the same host.
+          | ($dRows | map({mountpoint: .group.mountpoint, pct: .data.disk}) | sort_by(-.pct, .mountpoint) | (.[0] // null)) as $worstDisk
           | (($agg.memTotalMb // 0) > 0) as $hasMemTotal
           | (($agg.swapTotalMb // 0) > 0) as $hasSwapTotal
           | {

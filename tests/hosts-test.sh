@@ -21,7 +21,12 @@ assert_eq "512" "$(jq -r .memUsedMb <<<"$host")" "memUsedMb carries the absolute
 assert_eq "25" "$(jq -r .swapPct <<<"$host")" "swapPct is a real percentage: this fixture does have a swap total"
 assert_eq "128" "$(jq -r .swapUsedMb <<<"$host")" "swapUsedMb"
 assert_eq "92" "$(jq -r .diskPct <<<"$host")" "diskPct is the fullest mountpoint"
-assert_eq "/" "$(jq -r .diskMount <<<"$host")" "diskMount names it"
+# The fixture answers with "/srv/uploads" FIRST, tied at 92% with "/" (two
+# mountpoints on one filesystem, which is what a real host reports). Sorting
+# on the percentage alone left the winner up to the order the API happened to
+# answer in, so the SERVERS row and the agent prompt named a different
+# mountpoint from one refresh to the next; the name is the tie-break.
+assert_eq "/" "$(jq -r .diskMount <<<"$host")" "diskMount names it, breaking a tie by mountpoint name"
 assert_eq "2.5" "$(jq -r .load1 <<<"$host")" "load1"
 assert_eq "true" "$(jq -r .warn <<<"$host")" "warn: cpu 91.5 >= 80 and disk 92 >= 85"
 

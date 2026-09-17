@@ -370,6 +370,15 @@ Panel {
     root.bar.run(cmd)
   }
 
+  // SPEC.md and the README both promise the agent a ONE-LINE prompt, but the
+  // fields it is built from come from AppSignal verbatim, and an exception
+  // message routinely carries newlines (Rails puts request.formats and
+  // request.variant on their own lines). shellQuote kept that a single
+  // argument, so nothing was ever unsafe — but the command stopped being one
+  // line, and an agent that seeds an interactive prompt can stop reading at
+  // the first newline. Collapse every run of whitespace into one space.
+  function oneLine(s) { return String(s || "").replace(/\s+/g, " ").trim() }
+
   // Builds the one-line prompt from SPEC.md and hands it to the user's
   // default coding agent in a new terminal (same as `omarchy agent crash`),
   // then closes the panel. Empty fields (namespace, action, count, message,
@@ -400,7 +409,7 @@ Panel {
       "samples; explain the probable root cause and propose a fix. Do not change the " +
       "incident state or severity unless I ask.")
 
-    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
     root.close()
   }
 
@@ -446,7 +455,7 @@ Panel {
     parts.push("Use the AppSignal MCP to inspect performance samples and span breakdowns; find the " +
       "bottleneck and propose optimizations. Do not change anything in AppSignal unless I ask.")
 
-    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
     root.close()
   }
 
@@ -483,7 +492,7 @@ Panel {
       "throughput, slow actions and background jobs, and propose concrete optimizations (right-sizing, " +
       "memory, swap, disk cleanup, process counts). Do not change anything unless I ask.")
 
-    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
     root.close()
   }
 
@@ -518,7 +527,7 @@ Panel {
     parts.push("Use the AppSignal MCP to inspect the trigger and recent metric data; explain what is " +
       "driving it and whether it needs action. Do not change the trigger or acknowledge the alert unless I ask.")
 
-    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
     root.close()
   }
 
@@ -544,7 +553,7 @@ Panel {
     parts.push("Use the AppSignal MCP to inspect throughput, queue time and the slowest jobs in this queue; " +
       "propose fixes. Do not change anything unless I ask.")
 
-    root.runAction("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
     root.close()
   }
 

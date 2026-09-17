@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- Collector: with AppSignal unreachable (no network, DNS failure, connection
+  refused) the panel said "AppSignal returned HTTP 000000." instead of
+  "AppSignal unreachable: …" with curl's own reason. `curl` prints its
+  `%{http_code}` — `000` — even when it never got a response *and* exits
+  non-zero, so the trailing `|| echo 000` appended a second `000`; the result
+  matched neither the unreachable branch nor 200. New regression test
+  (`tests/unreachable-test.sh`, a curl stub, still no network).
+- Collector: the "fullest disk" on a SERVERS row is now tie-broken by
+  mountpoint name. Two mountpoints on one filesystem report the same
+  percentage, and sorting on the percentage alone left the winner up to the
+  order the API answered in — so the row and the agent prompt named a
+  different mountpoint from one refresh to the next.
+- Panel: the agent prompt is a single line again. Exception messages come
+  from AppSignal verbatim and routinely carry newlines (Rails puts
+  `request.formats` on its own line), which made the command multi-line —
+  never unsafe, since the whole prompt stays one shell-quoted argument, but
+  an agent that seeds an interactive prompt can stop reading at the first
+  newline.
+
 ## [0.7.0] - 2026-09-17
 
 Hardening release: no new user-visible features besides two settings — the
