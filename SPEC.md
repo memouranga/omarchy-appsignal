@@ -490,3 +490,56 @@ app.url"), clic derecho/`o` en una fila de host abre `app.url`.
   used") y, si el host está usando swap, "swap 512 MB in use"; una cláusula sin
   ningún dato se omite en vez de decir "null%". Clic derecho/`o` = navegador a `app.url` (ver arriba).
 - manifest version 0.5.0. README actualizado.
+
+---
+
+# v0.6 — Jobs, check-ins y alertas
+
+Spec de Fable, 2026-09-17. Sonnet investiga primero la API (solo lectura) y
+documenta aquí las consultas exactas antes de implementar.
+
+## Jobs (colas de background)
+- Métricas ya listadas para estas apps: `active_job_queue_job_count`,
+  `active_job_queue_priority_job_count`, `active_job_queue_time`,
+  `transaction_queue_duration`. Investigar con `type_and_tags` sus tags
+  (¿`queue`? ¿`status`/`state`? ¿adapter?) y unidades. Ventana: última hora.
+- Shape por app: `queues: [{name, processed, failed, queueTimeMs, warn}]`
+  (adaptar a lo que la API dé de verdad; si `failed` no existe, omitir).
+  Orden: por `queueTimeMs` desc. Top N = incidentsPerApp.
+- Setting `queueTimeWarn` (integer, ms, default 30000): `warn` si
+  `queueTimeMs` lo supera. `totals.queuesWarn` por app y global.
+- Panel: sección JOBS (después de UPTIME). Fila: glyph (mdi-tray-full o
+  similar, verificar con od), nombre de la cola, a la derecha
+  "1.2k jobs/h · 340 ms wait" (y "· 3 failed" en urgent si aplica).
+  Acción: Enter = agente ("Analyze background queue <name> of app … using the
+  AppSignal MCP: throughput, queue time and the slowest jobs; propose fixes"),
+  clic derecho/`o` = navegador a app.url.
+
+## Check-ins
+- El overview ya trae `checkIns[]` {identifier, kind, lastState, failing,
+  lastErrorAt, lastSuccessAt, url}. Panel: sección CHECK-INS. Fila: glyph
+  (mdi-timer-check o similar), identifier, kind en dim, a la derecha estado:
+  "OK · 2h ago" en accent o "MISSED · 5h ago" en urgent. Clic/Enter = navegador
+  (no agente). Oculta si vacío.
+- `totals.checkInsFailing` ya existe: sumarlo a `attentionNeeded` y al punto del tab.
+
+## Alerts (triggers de anomalías)
+- Añadir a la consulta GraphQL por app: alertas abiertas. Investigar en
+  https://appsignal.com/graphql/docs (HTML estático, descargable con curl) los
+  argumentos reales de `App.alerts` y los campos de `Trigger` (nombre/
+  descripción, metricName, condición, umbral). Pedir solo lo necesario y, si
+  hay argumento de estado/límite, usarlo para no traer el histórico.
+- Shape: `alerts: [{id, state, triggerName, metric, message, lastValue,
+  peakValue, openedAt, url}]` solo OPEN y WARMUP. `totals.alertsOpen`.
+- Panel: sección ALERTS arriba de OPEN ERRORS (es lo más urgente). Fila: glyph
+  de campana, triggerName, meta "<metric> · last <v> · peak <v>", a la derecha
+  "OPEN · 12m". Enter = agente ("Investigate the open AppSignal alert …"),
+  clic derecho/`o` = navegador.
+- Suma a `attentionNeeded`, punto del tab y tooltip del icono.
+
+## General
+- Orden final de secciones: ALERTS, OPEN ERRORS, PERFORMANCE, SERVERS, UPTIME,
+  JOBS, CHECK-INS, línea de deploy. Todas entran al cursor con su `kind`.
+- Tooltip del icono: resume solo lo que esté mal ("3 errors · 1 alert · 1 host hot").
+- manifest 0.6.0, README actualizado. Tiempo total del colector: objetivo < 7 s
+  con 2 apps fijadas (todo lo de fase 2 en paralelo).
