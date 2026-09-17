@@ -1,0 +1,43 @@
+{
+  "data": {
+    "viewer": {
+      "name": "Dev Example",
+      "email": "dev@example.com",
+      "organizations": [
+        {
+          "id": "org0000000000000000000001",
+          "name": "Acme",
+          "slug": "acme",
+          "apps": [
+            {
+              "id": "app0000000000000000000001",
+              "name": "Acme Web",
+              "environment": "production",
+              "status": "green",
+              "viewerPinned": true,
+              "lastPushProcessedAt": "2026-09-10T12:00:00Z",
+              "exceptionIncidents": [
+                {
+                  "number": 101,
+                  "exceptionName": "ActionController::BadRequest",
+                  "exceptionMessage": "invalid params",
+                  "actionNames": ["WelcomeController#home"],
+                  "namespace": "web",
+                  "count": 4,
+                  "severity": "error",
+                  "state": "OPEN",
+                  "lastOccurredAt": "2026-09-16T20:00:00Z"
+                }
+              ],
+              "performanceIncidents": [],
+              "uptimeMonitors": [],
+              "checkIns": { "triggers": [] },
+              "alerts": [],
+              "deployMarkers": []
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

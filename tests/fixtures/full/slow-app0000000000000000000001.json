@@ -1,0 +1,21 @@
+{
+  "rows": [
+    { "group": { "action": "ProfilesController#current_topics", "namespace": "web" },
+      "data": { "meanMs": 4, "count": 69397 } },
+    { "group": { "action": "ProfilesController#show", "namespace": "web" },
+      "data": { "meanMs": 87, "count": 265 } },
+    { "group": { "action": "Legacy::SlowController#index", "namespace": "web" },
+      "data": { "meanMs": 500, "count": 10 } },
+    { "group": { "action": "TinyController#ping", "namespace": "web" },
+      "data": { "meanMs": 1, "count": 100 } },
+    { "group": { "action": "Job::Mailer#deliver", "namespace": "background" },
+      "data": { "meanMs": 50, "count": 5000 } },
+    { "group": { "action": "Job::Cleanup#run", "namespace": "background" },
+      "data": { "meanMs": 20000, "count": 1 } },
+    { "group": { "action": "Job::Extra#run", "namespace": "background" },
+      "data": { "meanMs": 50, "count": 2 } },
+    { "group": { "action": "Job::Low#run", "namespace": "background" },
+      "data": { "meanMs": 1, "count": 1 } }
+  ],
+  "error": null
+}

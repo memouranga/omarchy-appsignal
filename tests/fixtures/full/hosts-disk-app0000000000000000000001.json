@@ -1,0 +1,9 @@
+{
+  "rows": [
+    { "group": { "hostname": "10.0.0.1-abc123def456", "mountpoint": "/" },
+      "data": { "disk": 92 } },
+    { "group": { "hostname": "10.0.0.1-abc123def456", "mountpoint": "/data" },
+      "data": { "disk": 40 } }
+  ],
+  "error": null
+}

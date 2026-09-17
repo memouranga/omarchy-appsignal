@@ -1,0 +1,11 @@
+{
+  "rows": [
+    { "group": { "hostname": "10.0.0.1-abc123def456", "state": "total_usage" },
+      "data": { "cpu": 91.5, "load1": 2.5 } },
+    { "group": { "hostname": "10.0.0.1-abc123def456", "state": "used" },
+      "data": { "memUsed": 512, "swap": 128 } },
+    { "group": { "hostname": "10.0.0.1-abc123def456", "state": "total" },
+      "data": { "swap": 512 } }
+  ],
+  "error": null
+}

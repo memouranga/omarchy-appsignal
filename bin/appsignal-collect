@@ -89,7 +89,7 @@ ignore_queues_json=$(jq -n --arg raw "$ignore_queues" \
 # membership check. An empty/malformed -sections falls back to "every
 # section on" rather than silently requesting nothing.
 sections_norm=",$(printf '%s' "$sections" | tr -d '[:space:]'),"
-[[ $sections_norm == "," ]] && sections_norm=",alerts,errors,performance,servers,uptime,jobs,checkins,deploy,"
+[[ $sections_norm == ",," ]] && sections_norm=",alerts,errors,performance,servers,uptime,jobs,checkins,deploy,"
 sections_has() { [[ $sections_norm == *",$1,"* ]]; }
 
 for tool in curl jq; do
@@ -245,8 +245,46 @@ find "$tmp_base" -maxdepth 1 -type d -name 'appsignal-collect.*' -mmin +60 \
 tmp=$(mktemp -d "$tmp_base/appsignal-collect.XXXXXX") || exit 1
 trap 'rm -rf "$tmp"' EXIT INT TERM HUP
 
+# v0.7: fixture mode for tests/ (SPEC.md "Tests del colector"). When
+# $APPSIGNAL_FIXTURE_DIR is set, every curl call below is replaced with a
+# read from "$APPSIGNAL_FIXTURE_DIR/<name>.json" (the response body, copied
+# to $out) and "$APPSIGNAL_FIXTURE_DIR/<name>.status" (the HTTP code, one
+# line). No network, no token sent anywhere. A missing .json is an empty
+# body; a missing .status defaults to 200 if the body exists, or 000 (as if
+# curl could not even connect) if it does not — which is what a test uses to
+# simulate "this app's phase 2 request never got a fixture", i.e. a genuine
+# failure, without writing an explicit 000 file for every such case.
+fixture_fetch() {
+  local name=$1 out=$2
+  local body="$APPSIGNAL_FIXTURE_DIR/$name.json" status="$APPSIGNAL_FIXTURE_DIR/$name.status"
+  if [[ -f $body ]]; then cp "$body" "$out"; else : > "$out"; fi
+  if [[ -f $status ]]; then head -n1 "$status" | tr -d '[:space:]'
+  elif [[ -f $body ]]; then echo 200
+  else echo 000
+  fi
+}
+
 run_query() {
   local gql=$1 body
+  if [[ -n ${APPSIGNAL_FIXTURE_DIR:-} ]]; then
+    # $gql is the query text itself, so it — not some counter — is the
+    # reliable way to tell the retry apart from the original call: run_query
+    # is invoked from inside $(...) command substitution, a subshell, so a
+    # plain shell counter meant to persist across the two calls would silently
+    # reset each time instead of accumulating. The retry always strips every
+    # #opt line first (see below), and checkIns only ever appears on one of
+    # them, so its absence from $gql is exactly "this is the retry" — read
+    # graphql-retry.json/.status instead of graphql.json/.status when the
+    # fixture provides one, for the "GraphQL con errors -> reintento sin
+    # #opt" test case.
+    local name=graphql
+    if [[ $gql != *"checkIns"* ]] \
+       && [[ -f "$APPSIGNAL_FIXTURE_DIR/graphql-retry.json" || -f "$APPSIGNAL_FIXTURE_DIR/graphql-retry.status" ]]; then
+      name=graphql-retry
+    fi
+    fixture_fetch "$name" "$tmp/resp.json"
+    return
+  fi
   body=$(jq -n --arg q "$gql" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}')
   curl -sS --max-time "$timeout" \
     -H "Content-Type: application/json" \
@@ -538,12 +576,17 @@ fetch_phase2_app() {
        ],
        group_by:[{Tag:"action"}, {Tag:"namespace"}], limit:200}')
 
-    hc=$(curl -sS --max-time "$metrics_timeout" \
-      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-      -X POST "$METRICS_ENDPOINT" -d "$health_body" -o "$health_out.raw" -w '%{http_code}' 2>/dev/null) || hc=000
-    sc=$(curl -sS --max-time "$metrics_timeout" \
-      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-      -X POST "$METRICS_ENDPOINT" -d "$slow_body" -o "$slow_out.raw" -w '%{http_code}' 2>/dev/null) || sc=000
+    if [[ -n ${APPSIGNAL_FIXTURE_DIR:-} ]]; then
+      hc=$(fixture_fetch "health-$app_id" "$health_out.raw")
+      sc=$(fixture_fetch "slow-$app_id" "$slow_out.raw")
+    else
+      hc=$(curl -sS --max-time "$metrics_timeout" \
+        -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+        -X POST "$METRICS_ENDPOINT" -d "$health_body" -o "$health_out.raw" -w '%{http_code}' 2>/dev/null) || hc=000
+      sc=$(curl -sS --max-time "$metrics_timeout" \
+        -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+        -X POST "$METRICS_ENDPOINT" -d "$slow_body" -o "$slow_out.raw" -w '%{http_code}' 2>/dev/null) || sc=000
+    fi
 
     if [[ $hc == 200 ]] && jq -e '.rows and (.error | not)' "$health_out.raw" >/dev/null 2>&1; then
       jq '
@@ -614,12 +657,17 @@ fetch_phase2_app() {
      select:[{id:"disk", name:"disk_usage", tags:{mountpoint:"*", hostname:"*"}, field:"GAUGE", aggregation:"AVERAGE"}],
      group_by:[{Tag:"hostname"}, {Tag:"mountpoint"}], limit:100}')
 
-  hmc=$(curl -sS --max-time "$metrics_timeout" \
-    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    -X POST "$METRICS_ENDPOINT" -d "$hm_body" -o "$hosts_out.hm.raw" -w '%{http_code}' 2>/dev/null) || hmc=000
-  dc=$(curl -sS --max-time "$metrics_timeout" \
-    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    -X POST "$METRICS_ENDPOINT" -d "$disk_body" -o "$hosts_out.disk.raw" -w '%{http_code}' 2>/dev/null) || dc=000
+  if [[ -n ${APPSIGNAL_FIXTURE_DIR:-} ]]; then
+    hmc=$(fixture_fetch "hosts-hm-$app_id" "$hosts_out.hm.raw")
+    dc=$(fixture_fetch "hosts-disk-$app_id" "$hosts_out.disk.raw")
+  else
+    hmc=$(curl -sS --max-time "$metrics_timeout" \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      -X POST "$METRICS_ENDPOINT" -d "$hm_body" -o "$hosts_out.hm.raw" -w '%{http_code}' 2>/dev/null) || hmc=000
+    dc=$(curl -sS --max-time "$metrics_timeout" \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      -X POST "$METRICS_ENDPOINT" -d "$disk_body" -o "$hosts_out.disk.raw" -w '%{http_code}' 2>/dev/null) || dc=000
+  fi
 
   if [[ $hmc == 200 && $dc == 200 ]] \
      && jq -e '.rows and (.error | not)' "$hosts_out.hm.raw" >/dev/null 2>&1 \
@@ -721,9 +769,13 @@ fetch_phase2_app() {
      ],
      group_by:[{Tag:"queue"}], limit:100}')
 
-  jc=$(curl -sS --max-time "$metrics_timeout" \
-    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    -X POST "$METRICS_ENDPOINT" -d "$jobs_body" -o "$jobs_out.raw" -w '%{http_code}' 2>/dev/null) || jc=000
+  if [[ -n ${APPSIGNAL_FIXTURE_DIR:-} ]]; then
+    jc=$(fixture_fetch "jobs-$app_id" "$jobs_out.raw")
+  else
+    jc=$(curl -sS --max-time "$metrics_timeout" \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      -X POST "$METRICS_ENDPOINT" -d "$jobs_body" -o "$jobs_out.raw" -w '%{http_code}' 2>/dev/null) || jc=000
+  fi
 
   if [[ $jc == 200 ]] && jq -e '.rows and (.error | not)' "$jobs_out.raw" >/dev/null 2>&1; then
     jq --argjson limit "$limit" --argjson queueTimeWarn "$queue_time_warn" \
