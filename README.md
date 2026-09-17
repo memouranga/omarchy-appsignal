@@ -151,7 +151,7 @@ agents and for OAuth as an alternative to a Bearer token.
 
 - **Dependencies:** `curl` and `jq`, both present on a stock Omarchy install. Nothing is compiled, installed or fetched at runtime.
 - **Network:** one HTTPS request to `appsignal.com` per refresh. Your token travels only there, as the query parameter AppSignal's API requires.
-- **Privileges:** runs unsandboxed inside the Omarchy shell as your user, like every plugin. It reads your token file, writes one state file, and opens URLs with `omarchy launch browser`. No `sudo`, no services, no background daemons.
+- **Privileges:** runs unsandboxed inside the Omarchy shell as your user, like every plugin. It reads your token file, writes one state file, and opens URLs with `omarchy launch browser`. It never asks for elevated privileges and installs no services or background daemons.
 - **Read only:** the token grants read access to your AppSignal account. The plugin never mutates anything there.
 
 ## How it works
