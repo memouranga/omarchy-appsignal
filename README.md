@@ -135,6 +135,8 @@ Set them on the widget entry in `~/.config/omarchy/shell.json`:
 | `diskWarn` | `85` | Same, for the fullest disk mountpoint's % |
 | `queueTimeWarn` | `30000` | Job queue wait time, in milliseconds, at or above which a job row's wait figure turns urgent. A `scheduled` queue never warns; a queue with failed jobs always does |
 | `ignoreQueues` | *(empty)* | Comma-separated queue names to leave out of the Jobs section entirely, e.g. `mailers, low_priority` |
+| `sections` | `alerts,errors,performance,servers,uptime,jobs,checkins,deploy` | Comma-separated section keys, in the order you want them on screen. Leave one out to hide it; unknown keys are ignored. Leaving out `performance`, `servers` or `jobs` also skips that section's request to the metrics API, so it's a real cost saving, not just a display filter |
+| `appOrder` | `attention` | Order of the app tab row: `attention` puts apps with something wrong first (default), `name` is alphabetical, `pinned` keeps the order AppSignal itself returns |
 
 ### Pinning apps in AppSignal
 
@@ -175,6 +177,24 @@ this plugin and the prompt it sends only need to read incidents, traces and samp
 them. See [docs.appsignal.com/mcp-server](https://docs.appsignal.com/mcp-server) for setup with other
 agents and for OAuth as an alternative to a Bearer token.
 
+## Dry-run mode
+
+For testing the agent/browser action without actually running it — the panel drives a real coding
+agent session or opens a real browser tab, so simulating clicks or key presses against it is not
+safe to do against real incidents. Set `OMARCHY_APPSIGNAL_DRY_RUN=1` in the shell's environment, or
+create the flag file:
+
+```bash
+mkdir -p ~/.local/state/omarchy/appsignal
+touch ~/.local/state/omarchy/appsignal/dry-run
+```
+
+With either one active, every action that would otherwise run a real command only logs it
+(`memong.appsignal DRY-RUN: <command>`) instead, and the panel's header shows **DRY RUN** next to
+"UPDATED …" as visible proof before you press `Enter`/`o` on a row. The flag file is re-checked each
+time the panel opens, so toggling it takes effect without an `omarchy restart shell`. Remove the file
+(or unset the variable and restart the shell) to go back to normal.
+
 ## Requirements and trust
 
 - **Dependencies:** `curl` and `jq`, both present on a stock Omarchy install. Nothing is compiled, installed or fetched at runtime.
@@ -212,14 +232,17 @@ web/background; the last 15 minutes of host metrics (CPU, memory, swap, load, di
 since CPU/memory/swap and disk usage need different tag groupings); and the last hour's job queues
 (jobs processed, failed, and two views of the wait time per background queue). This phase runs in parallel
 per app with its own timeout; if any of these fail for an app, that app's health line, performance,
-servers or jobs section is simply empty — the rest of the overview is unaffected. The exact queries,
-and how each host percentage and job-queue figure is derived, are documented in `SPEC.md` ("v0.4",
-"v0.5" and "v0.6").
+servers or jobs section is simply empty — the rest of the overview is unaffected. The `sections`
+setting is forwarded to the collector too: turning off performance, servers or jobs skips that
+request entirely instead of just hiding the result. The exact queries, and how each host percentage
+and job-queue figure is derived, are documented in `SPEC.md` ("v0.4", "v0.5" and "v0.6").
 
 ## Roadmap
 
-- `v0.7`: settings for which sections show and their order, a dry-run mode for agent actions, tests,
-  CI, and full keyboard accessibility — see `ROADMAP.md`.
+`v0.7` (this release) was hardening only: the `sections`/`appOrder` settings above, dry-run mode,
+the collector's fixture-mode test suite, and CI. What's left before `v1.0` — a manual smoke test on
+a real AppSignal app with every section populated, the official plugin checklist, and the `dev` →
+`main` merge — is tracked in `ROADMAP.md`.
 
 ## Contributing
 
@@ -228,6 +251,19 @@ Issues and pull requests welcome. Validate before you push:
 ```bash
 omarchy plugin validate .
 ```
+
+The collector's transform logic (the jq that turns AppSignal's API responses into
+`overview.json`) has its own test suite, no network or real token required:
+
+```bash
+tests/run.sh
+```
+
+It replaces every `curl` call with a read from `tests/fixtures/<scenario>/`
+(`APPSIGNAL_FIXTURE_DIR` — see the comment above `fixture_fetch()` in
+`bin/appsignal-collect` if you're adding a case). CI
+(`.github/workflows/ci.yml`) runs this, `shellcheck`, and a `manifest.json`
+validity check on every push and PR to `dev` and `main`.
 
 ## License
 
