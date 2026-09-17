@@ -162,6 +162,11 @@ Item {
           // actions, only populated for apps the collector's metrics phase
           // covered (pinned apps, or the fallback first 6). null/[] otherwise.
           health: a.health && typeof a.health === "object" ? a.health : null,
+          // v0.4.1: ranked by impact (totalMs = meanMs * count), split web vs.
+          // background. slowActions is kept as their concatenation only for
+          // compatibility; the panel renders the two lists separately.
+          slowWeb: Array.isArray(a.slowWeb) ? a.slowWeb : [],
+          slowBackground: Array.isArray(a.slowBackground) ? a.slowBackground : [],
           slowActions: Array.isArray(a.slowActions) ? a.slowActions : []
         })
       }

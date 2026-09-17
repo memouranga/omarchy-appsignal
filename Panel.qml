@@ -67,16 +67,20 @@ Panel {
     for (var j = 0; j < errs.length; j++)
       rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
     // PERFORMANCE: open incidents take priority (rare — AppSignal auto-closes
-    // them); with none open, fall back to the 24h slowest actions the
-    // collector's metrics phase computed. Never both at once.
+    // them); with none open, fall back to the two 24h impact-ranked lists the
+    // collector's metrics phase computed (web first, then background). Never
+    // both perf incidents and slow-action rows at once.
     var perf = root.asList(app.perf)
     if (perf.length > 0) {
       for (var p = 0; p < perf.length; p++)
         rows.push({ kind: "perf", app: app, item: perf[p], url: perf[p].url })
     } else {
-      var slow = root.asList(app.slowActions)
-      for (var s = 0; s < slow.length; s++)
-        rows.push({ kind: "slow", app: app, item: slow[s], url: app.perfUrl })
+      var slowWeb = root.asList(app.slowWeb)
+      for (var sw = 0; sw < slowWeb.length; sw++)
+        rows.push({ kind: "slow", app: app, item: slowWeb[sw], url: app.perfUrl })
+      var slowBg = root.asList(app.slowBackground)
+      for (var sb = 0; sb < slowBg.length; sb++)
+        rows.push({ kind: "slow", app: app, item: slowBg[sb], url: app.perfUrl })
     }
     var mons = root.asList(app.monitors)
     for (var k = 0; k < mons.length; k++)
@@ -330,8 +334,10 @@ Panel {
     var parts
     if (row.kind === "slow") {
       var meanMs = Math.round(Number(it.meanMs || 0))
+      var totalMs = Number(it.totalMs || (Number(it.meanMs || 0) * count))
       parts = ["Investigate slow action " + action + " (" + namespace + ") in app " + appPart +
-        ": mean " + meanMs + " ms over " + count + " requests in the last 24h."]
+        ": mean " + meanMs + " ms over " + root.plural(count, "request", "requests") +
+        " in the last 24h, totaling " + root.humanizePerDay(totalMs) + "."]
     } else {
       var head = "Investigate AppSignal performance incident"
       if (it.number) head += " #" + it.number
@@ -380,6 +386,19 @@ Panel {
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   function plural(n, one, many) { return n + " " + (n === 1 ? one : many) }
+
+  // "36 min/day" for a 24h totalMs (the collector's window already is 24h, so
+  // totalMs over that window equals the daily total): seconds under a
+  // minute, minutes under an hour, hours (one decimal below 10h) above that.
+  function humanizePerDay(ms) {
+    var totalSeconds = Math.max(0, Number(ms) || 0) / 1000
+    if (totalSeconds < 60) return Math.round(totalSeconds) + " s/day"
+    var totalMinutes = totalSeconds / 60
+    if (totalMinutes < 60) return Math.round(totalMinutes) + " min/day"
+    var totalHours = totalMinutes / 60
+    var hoursText = totalHours >= 10 ? Math.round(totalHours) : totalHours.toFixed(1).replace(/\.0$/, "")
+    return hoursText + " h/day"
+  }
 
   // "updated"/"stale" reads this instead of Date.now() so the panel keeps
   // telling the truth while it sits open.
@@ -824,10 +843,17 @@ Panel {
             readonly property var errs: root.asList(appSection.app.errors)
             readonly property var mons: root.asList(appSection.app.monitors)
             readonly property var perfIncidents: root.asList(appSection.app.perf)
-            readonly property var slowActions: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowActions)
+            // v0.4.1: two impact-ranked lists (web, background) instead of one
+            // mean-ranked list; only used as a fallback when there is no open
+            // performance incident.
+            readonly property var slowWeb: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowWeb)
+            readonly property var slowBackground: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowBackground)
             // Where the PERFORMANCE rows (perf incidents, or their slow-action
-            // fallback) sit in focusRows: right after the error rows.
-            readonly property int perfRowCount: appSection.perfIncidents.length > 0 ? appSection.perfIncidents.length : appSection.slowActions.length
+            // fallback: web rows then background rows) sit in focusRows: right
+            // after the error rows.
+            readonly property int perfRowCount: appSection.perfIncidents.length > 0
+              ? appSection.perfIncidents.length
+              : (appSection.slowWeb.length + appSection.slowBackground.length)
             readonly property int monitorFlatOffset: appSection.errs.length + appSection.perfRowCount
 
             PanelSeparator { foreground: root.foreground }
@@ -932,31 +958,19 @@ Panel {
 
             // ---- Performance ----
             // Open performance incidents when there are any (AppSignal auto-
-            // closes these, so it is rare); otherwise the 24h slowest actions
-            // the collector's metrics phase computed. Hidden entirely when
-            // neither exists (app outside that phase, or nothing slow).
+            // closes these, so it is rare); otherwise two 24h impact-ranked
+            // lists (WEB, BACKGROUND) the collector's metrics phase computed.
+            // Hidden entirely when none of the three exists.
             Column {
               width: parent.width
-              visible: appSection.perfIncidents.length > 0 || appSection.slowActions.length > 0
+              visible: appSection.perfIncidents.length > 0 || appSection.slowWeb.length > 0 || appSection.slowBackground.length > 0
               spacing: Style.space(6)
 
               PanelSectionHeader {
                 width: parent.width
-                visible: appSection.perfIncidents.length > 0
                 text: "PERFORMANCE"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-              }
-
-              Text {
-                width: parent.width
-                visible: appSection.perfIncidents.length === 0 && appSection.slowActions.length > 0
-                text: "SLOWEST ACTIONS · 24H"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                font.letterSpacing: 1.2
               }
 
               Repeater {
@@ -972,16 +986,63 @@ Panel {
                 }
               }
 
-              Repeater {
-                model: appSection.slowActions
+              // WEB · 24H
+              Column {
+                width: parent.width
+                visible: appSection.perfIncidents.length === 0 && appSection.slowWeb.length > 0
+                spacing: Style.space(6)
 
-                SlowActionRow {
-                  required property var modelData
-                  required property int index
+                Text {
+                  width: parent.width
+                  text: "WEB · 24H"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.letterSpacing: 1.2
+                }
 
-                  width: appSection.width
-                  action: modelData
-                  flatIndex: appSection.errs.length + index
+                Repeater {
+                  model: appSection.slowWeb
+
+                  SlowActionRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    action: modelData
+                    flatIndex: appSection.errs.length + index
+                  }
+                }
+              }
+
+              // BACKGROUND · 24H
+              Column {
+                width: parent.width
+                visible: appSection.perfIncidents.length === 0 && appSection.slowBackground.length > 0
+                spacing: Style.space(6)
+
+                Text {
+                  width: parent.width
+                  text: "BACKGROUND · 24H"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.letterSpacing: 1.2
+                }
+
+                Repeater {
+                  model: appSection.slowBackground
+
+                  SlowActionRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    action: modelData
+                    flatIndex: appSection.errs.length + appSection.slowWeb.length + index
+                  }
                 }
               }
             }
@@ -1388,7 +1449,9 @@ Panel {
     readonly property string namespace: slowRow.action ? String(slowRow.action.namespace || "") : ""
     readonly property real meanMs: slowRow.action ? Number(slowRow.action.meanMs || 0) : 0
     readonly property int count: slowRow.action ? Number(slowRow.action.count || 0) : 0
-    readonly property string stat: Math.round(slowRow.meanMs) + " ms  ·  " + slowRow.count + "×"
+    readonly property real totalMs: slowRow.action
+      ? Number(slowRow.action.totalMs !== undefined ? slowRow.action.totalMs : slowRow.meanMs * slowRow.count) : 0
+    readonly property string stat: Math.round(slowRow.meanMs) + " ms  ·  " + slowRow.count + "×  ·  " + root.humanizePerDay(slowRow.totalMs)
     readonly property string url: slowRow.action ? String(slowRow.action.url || "") : ""
 
     foreground: root.foreground

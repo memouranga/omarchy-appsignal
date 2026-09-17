@@ -385,13 +385,16 @@ fetch_phase2_app() {
      ],
      group_by:["Name"], limit:10}')
 
+  # v0.4.1: ask for a deep limit (>=200) so the impact ranking below (totalMs =
+  # meanMs * count) is computed over the real 24h action set, not just a
+  # top-100-by-mean that can hide high-volume, high-impact actions.
   slow_body=$(jq -n --arg site "$app_id" --arg from "$from24" --arg to "$to24" '
     {site_id:$site, from:$from, to:$to, resolution:"HOURLY",
      select:[
        {id:"meanMs", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"MEAN", aggregation:"AVERAGE"},
        {id:"count", name:"transaction_duration", tags:{namespace:"*", action:"*"}, field:"COUNT", aggregation:"SUM"}
      ],
-     group_by:[{Tag:"action"}, {Tag:"namespace"}], limit:100}')
+     group_by:[{Tag:"action"}, {Tag:"namespace"}], limit:200}')
 
   hc=$(curl -sS --max-time "$metrics_timeout" \
     -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
@@ -411,16 +414,27 @@ fetch_phase2_app() {
     echo null > "$health_out"
   fi
 
+  # v0.4.1: rank by impact (totalMs = meanMs * count), not by mean alone — a
+  # 59s job that ran once and a 5ms action that ran 100k times both looked
+  # "slow" under the old mean-only sort, but only one of them matters. Split
+  # into slowWeb (namespace "web") and slowBackground (everything else, e.g.
+  # background jobs), each independently ranked and capped at N = floor
+  # (incidentsPerApp / 2) + 1 rows (default incidentsPerApp 5 -> 3 rows/group).
   if [[ $sc == 200 ]] && jq -e '.rows and (.error | not)' "$slow_out.raw" >/dev/null 2>&1; then
-    jq --argjson n "$limit" '
-      [ (.rows // [])[]
-        | select(.data.meanMs != null)
-        | { action: (.group.action // ""), namespace: (.group.namespace // ""),
-            meanMs: (.data.meanMs // 0), count: (.data.count // 0) }
-      ] | sort_by(-.meanMs) | .[0:$n]
-    ' "$slow_out.raw" > "$slow_out" 2>/dev/null || echo '[]' > "$slow_out"
+    jq --argjson limit "$limit" '
+      ( ($limit / 2 | floor) + 1 ) as $n
+      | [ (.rows // [])[]
+          | select(.data.meanMs != null)
+          | { action: (.group.action // ""), namespace: (.group.namespace // ""),
+              meanMs: (.data.meanMs // 0), count: (.data.count // 0),
+              totalMs: ((.data.meanMs // 0) * (.data.count // 0)) }
+        ] as $all
+      | ($all | map(select(.namespace == "web")) | sort_by(-.totalMs) | .[0:$n]) as $web
+      | ($all | map(select(.namespace != "web")) | sort_by(-.totalMs) | .[0:$n]) as $bg
+      | { slowWeb: $web, slowBackground: $bg, slowActions: ($web + $bg) }
+    ' "$slow_out.raw" > "$slow_out" 2>/dev/null || echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}' > "$slow_out"
   else
-    echo '[]' > "$slow_out"
+    echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}' > "$slow_out"
   fi
 }
 
@@ -436,8 +450,9 @@ fi
   for app_id in "${phase2_ids[@]}"; do
     jq -n --arg id "$app_id" \
       --slurpfile h <(cat "$tmp/health_$app_id.json" 2>/dev/null || echo null) \
-      --slurpfile s <(cat "$tmp/slow_$app_id.json" 2>/dev/null || echo '[]') \
-      '{($id): {health: ($h[0] // null), slowActions: ($s[0] // [])}}'
+      --slurpfile s <(cat "$tmp/slow_$app_id.json" 2>/dev/null || echo '{"slowWeb":[],"slowBackground":[],"slowActions":[]}') \
+      '{($id): {health: ($h[0] // null), slowWeb: ($s[0].slowWeb // []),
+                slowBackground: ($s[0].slowBackground // []), slowActions: ($s[0].slowActions // [])}}'
   done
 } | jq -s 'add' > "$tmp/phase2.json"
 
@@ -447,7 +462,10 @@ jq --slurpfile p2 "$tmp/phase2.json" '
       .organizations[]
       | .apps = [
           .apps[]
-          | . + { health: ($p2[.id].health // null), slowActions: ($p2[.id].slowActions // []) }
+          | . + { health: ($p2[.id].health // null),
+                  slowWeb: ($p2[.id].slowWeb // []),
+                  slowBackground: ($p2[.id].slowBackground // []),
+                  slowActions: ($p2[.id].slowActions // []) }
         ]
     ]
 ' "$tmp/phase1.json" | write_out
