@@ -222,9 +222,18 @@ Respuesta: una fila por métrica (porque `group_by` es `["Name"]`), cada una con
 su propio selector en `data`; se combinan con `[.rows[].data] | add`.
 Ejemplo real (SkillsNT prod, 17:01–18:00 UTC): `throughput: 2693` (requests en
 la hora — `SUM` sobre `MINUTELY` ya da el total de la ventana, no hace falta
-dividir), `errorRate: 0.0` (fracción 0–1; confirmado no-cero en otra ventana:
-`0.01` = 1%), `meanMs: 4.55` (ms). CloudHealth prod: `throughput: 2473`,
-`errorRate: 0.0`, `meanMs: 537.86`.
+dividir), `errorRate: 0.0`, `meanMs: 4.55` (ms). CloudHealth prod:
+`throughput: 2473`, `errorRate: 0.0`, `meanMs: 537.86`.
+
+**`error_rate` ya viene en por ciento (0–100), no como fracción 0–1.**
+Corregido el 2026-09-17 contra la API: con `group_by` por `namespace` y
+`aggregation: MAX` sobre 30 días, los namespaces que fallan en todas sus
+transacciones (`unhandled`, `rake`, `runner`) devuelven exactamente `100.0`,
+y hay valores intermedios como `16.08` y `5.02` — imposibles en una fracción.
+Contraste independiente: SkillsNT prod 24h da `error_rate 0.07` con 44
+respuestas HTTP 500 sobre ~78k requests (0.06%), no 7%. El panel imprime el
+valor tal cual (nunca `× 100`), con decimales suficientes para que un 0.07%
+real no se vea como "0.0%".
 
 Notas de la API aprendidas a la fuerza:
 - `site_throughput` no tiene tags (`available_tags: []`); pedirlo con un tag

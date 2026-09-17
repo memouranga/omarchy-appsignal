@@ -209,9 +209,26 @@ Panel {
 
   // Row delegates register themselves so the cursor can scroll to a row
   // that is currently off-screen without guessing at layout geometry.
-  property var rowItems: ({})
-  function registerRow(index, item) { root.rowItems[index] = item }
-  function unregisterRow(index, item) { if (root.rowItems[index] === item) delete root.rowItems[index] }
+  //
+  // The registry is keyed by item identity, not by flatIndex: a delegate's
+  // flatIndex is a live binding (the PERFORMANCE and UPTIME rows offset
+  // themselves by how many rows sit above them), so it routinely changes
+  // after Component.onCompleted — a Repeater can finish building the slow-
+  // action rows while `errors` is still empty, then shift them from 0-4 to
+  // 5-9 once the data lands. An index-keyed map recorded the stale indices
+  // and the later rows became unreachable, so the panel never scrolled to
+  // them (G, or j/k past the fold, moved the cursor off-screen silently).
+  property var rowItems: []
+  function registerRow(item) { if (item && root.rowItems.indexOf(item) < 0) root.rowItems.push(item) }
+  function unregisterRow(item) {
+    var at = root.rowItems.indexOf(item)
+    if (at >= 0) root.rowItems.splice(at, 1)
+  }
+  function rowItemAt(index) {
+    for (var i = 0; i < root.rowItems.length; i++)
+      if (root.rowItems[i] && root.rowItems[i].flatIndex === index) return root.rowItems[i]
+    return null
+  }
 
   function moveRows(dy) {
     var n = root.focusRows.length
@@ -338,14 +355,24 @@ Panel {
 
   function scrollToSelected() {
     if (!panelFlick || root.focusRows.length === 0) return
-    var row = root.rowItems[root.clamp(root.selectedRowIndex, 0, root.focusRows.length - 1)]
+    var last = root.focusRows.length - 1
+    var row = root.rowItemAt(root.clamp(root.selectedRowIndex, 0, last))
     if (!row) return
+    var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+    // The deploy line hangs below the last row and is not focusable, so
+    // stopping one padding short of the bottom row would leave it forever
+    // off-screen for anyone driving the panel from the keyboard. On the last
+    // row, go all the way down instead.
+    if (root.selectedRowIndex >= last) { panelFlick.contentY = maxY; return }
+    // Same on the way up: the hero and the app tabs sit above the first row,
+    // so parking on it means the top of the panel.
+    if (root.selectedRowIndex <= 0) { panelFlick.contentY = 0; return }
     var pos = row.mapToItem(panelFlick.contentItem, 0, 0)
     var pad = Style.space(8)
     if (pos.y - pad < panelFlick.contentY)
       panelFlick.contentY = Math.max(0, pos.y - pad)
     else if (pos.y + row.height + pad > panelFlick.contentY + panelFlick.height)
-      panelFlick.contentY = pos.y + row.height + pad - panelFlick.height
+      panelFlick.contentY = Math.min(maxY, pos.y + row.height + pad - panelFlick.height)
   }
 
   // ---------------------------------------------------------------- helpers
@@ -415,6 +442,19 @@ Panel {
     return String(Math.round(n))
   }
 
+  // AppSignal's error_rate gauge is already expressed in percent, not as a
+  // 0-1 fraction: namespaces that fail on every transaction ("unhandled",
+  // "rake", "runner") report exactly 100.0, and SkillsNT prod's 0.07 over 24h
+  // lines up with its 44 HTTP 500s out of ~78k requests (0.06%), not with 7%.
+  // So the value is printed as-is, with enough decimals that a real-world
+  // rate below 1% does not collapse into "0.0%".
+  function formatPercent(n) {
+    if (!isFinite(n) || n <= 0) return "0%"
+    if (n >= 10) return Math.round(n) + "%"
+    if (n >= 1) return n.toFixed(1).replace(/\.0$/, "") + "%"
+    return n.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "%"
+  }
+
   // The health line under the app header: "1.2k req/h · 0.4% errors · 182 ms
   // mean" (last hour). Any missing field is omitted, not zeroed; with no
   // health at all (app outside the collector's metrics phase, or that phase
@@ -426,7 +466,7 @@ Panel {
     if (h.throughput !== null && h.throughput !== undefined)
       parts.push(root.formatCount(Number(h.throughput)) + " req/h")
     if (h.errorRate !== null && h.errorRate !== undefined)
-      parts.push((Number(h.errorRate) * 100).toFixed(1) + "% errors")
+      parts.push(root.formatPercent(Number(h.errorRate)) + " errors")
     if (h.meanMs !== null && h.meanMs !== undefined)
       parts.push(Math.round(Number(h.meanMs)) + " ms mean")
     return parts.join(" · ")
@@ -1024,8 +1064,8 @@ Panel {
     implicitHeight: Math.max(Style.space(40),
       rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
 
-    Component.onCompleted: root.registerRow(errorRow.flatIndex, errorRow)
-    Component.onDestruction: root.unregisterRow(errorRow.flatIndex, errorRow)
+    Component.onCompleted: root.registerRow(errorRow)
+    Component.onDestruction: root.unregisterRow(errorRow)
 
     Column {
       id: rowBody
@@ -1134,8 +1174,8 @@ Panel {
     implicitHeight: Math.max(Style.space(40),
       rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
 
-    Component.onCompleted: root.registerRow(monitorRow.flatIndex, monitorRow)
-    Component.onDestruction: root.unregisterRow(monitorRow.flatIndex, monitorRow)
+    Component.onCompleted: root.registerRow(monitorRow)
+    Component.onDestruction: root.unregisterRow(monitorRow)
 
     Column {
       id: rowBody
@@ -1244,8 +1284,8 @@ Panel {
     implicitHeight: Math.max(Style.space(40),
       rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
 
-    Component.onCompleted: root.registerRow(perfRow.flatIndex, perfRow)
-    Component.onDestruction: root.unregisterRow(perfRow.flatIndex, perfRow)
+    Component.onCompleted: root.registerRow(perfRow)
+    Component.onDestruction: root.unregisterRow(perfRow)
 
     Column {
       id: rowBody
@@ -1356,8 +1396,8 @@ Panel {
     implicitHeight: Math.max(Style.space(40),
       rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
 
-    Component.onCompleted: root.registerRow(slowRow.flatIndex, slowRow)
-    Component.onDestruction: root.unregisterRow(slowRow.flatIndex, slowRow)
+    Component.onCompleted: root.registerRow(slowRow)
+    Component.onDestruction: root.unregisterRow(slowRow)
 
     Column {
       id: rowBody
