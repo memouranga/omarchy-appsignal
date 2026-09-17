@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest ships jq and shellcheck already; no install step needed.
+      - name: Validate manifest.json
+        run: jq -e . manifest.json > /dev/null
+
+      - name: shellcheck
+        run: shellcheck bin/appsignal-collect tests/*.sh
+
+      - name: Collector tests (no network, no credentials)
+        run: tests/run.sh
