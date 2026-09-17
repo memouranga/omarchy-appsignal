@@ -742,3 +742,58 @@ descargado con curl y buscado con Python/regex, tipos en
 - Tooltip del icono: resume solo lo que esté mal ("3 errors · 1 alert · 1 host hot").
 - manifest 0.6.0, README actualizado. Tiempo total del colector: objetivo < 7 s
   con 2 apps fijadas (todo lo de fase 2 en paralelo).
+
+---
+
+# v0.7 — Endurecimiento
+
+Spec de Fable, 2026-09-17. Sin funciones nuevas visibles salvo los settings;
+el objetivo es que v1.0 sea mantenible y segura de probar.
+
+## Dry-run (primero, porque desbloquea pruebas)
+- Si el entorno del shell trae `OMARCHY_APPSIGNAL_DRY_RUN=1` (leer con
+  `Quickshell.env`), TODA acción que hoy hace `root.bar.run(cmd)` (agente y
+  navegador) pasa por una única función `runAction(cmd)` que en dry-run hace
+  `console.log("memong.appsignal DRY-RUN:", cmd)` y no ejecuta. Un solo punto
+  de salida: no debe quedar ningún `bar.run` directo en Panel.qml.
+- Además: archivo bandera `~/.local/state/omarchy/appsignal/dry-run` (si
+  existe, dry-run activo) para poder activarlo sin reiniciar el shell con otro
+  entorno. El panel muestra "DRY RUN" en dim junto a "UPDATED …" cuando está activo.
+- Con dry-run activo (y SOLO entonces) las pruebas automatizadas pueden
+  pulsar Enter/`o` sobre filas. El tester debe verificar primero que el
+  indicador "DRY RUN" se ve en pantalla.
+
+## Settings
+- `sections` (string, lista separada por comas, default
+  "alerts,errors,performance,servers,uptime,jobs,checkins,deploy"): secciones
+  visibles y su orden. Valores desconocidos se ignoran. El colector se salta
+  las peticiones de fase 2 de secciones apagadas.
+- `appOrder` (enum: `attention` | `name` | `pinned`; default `attention`):
+  orden de la fila de apps. `name` = alfabético estable; `pinned` = orden en
+  que las devuelve AppSignal.
+
+## Tests del colector
+- `tests/run.sh` + `tests/*-test.sh` + `tests/fixtures/*.json`, patrón del
+  plugin dev.git (~/.config/omarchy/plugins/dev.git/tests/). Sin red: el
+  colector acepta `APPSIGNAL_FIXTURE_DIR` (solo para tests) y, si está definido,
+  lee de ahí las respuestas (graphql.json, health-<appId>.json, etc.) en lugar
+  de llamar a curl. Fixtures ANONIMIZADOS (nada de nombres de apps, emails,
+  IPs ni ids reales de Memo).
+- Casos mínimos: overview feliz; sin token; 401; GraphQL con `errors` →
+  reintento sin `#opt`; fase 2 caída → health null y ready true; ranking por
+  impacto web/background; error_rate sin ×100; hosts sin `total` → memPct null
+  + memUsedMb; colas: MEAN/MIN, `scheduled`, `failed` → warn, `ignoreQueues`;
+  `onlyPinned` sin apps fijadas; `sections` apaga peticiones.
+
+## CI
+- `.github/workflows/ci.yml` en push y PR a `dev` y `main`: `jq -e .` sobre
+  manifest.json, `shellcheck bin/appsignal-collect tests/*.sh`, `tests/run.sh`.
+  (shellcheck no está instalado en la máquina de Memo; CI es donde corre.
+  Corrige lo que marque.)
+
+## Docs
+- `CHANGELOG.md` (Keep a Changelog) con 0.1.0 → 0.7.0 reconstruido desde git log.
+- README final: capturas nuevas (`preview.png`, `bar.png`) tomadas con un
+  overview SINTÉTICO anonimizado que muestre todas las secciones (nada de
+  datos reales de Memo en imágenes públicas), tabla completa de settings y teclas.
+- manifest 0.7.0.
