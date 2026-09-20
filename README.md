@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="preview.png" alt="The AppSignal panel listing open exception incidents per app" width="560">
+  <img src="preview.png" alt="The AppSignal panel: open error incidents and the slowest web and background actions on the left, host metrics, uptime monitors, job queues and the last deploy on the right" width="920">
 </p>
 
 <p align="center">
