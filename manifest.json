@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "memong.appsignal",
   "name": "AppSignal",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Memo Uranga",
   "license": "MIT",
   "description": "AppSignal at a glance: open anomaly alerts, error and performance incidents, server (CPU/memory/disk/load) health, uptime monitors, background job queues, check-ins and last deploy for every app you can see, in a native Omarchy bar panel.",

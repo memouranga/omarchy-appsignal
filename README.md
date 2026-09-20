@@ -198,9 +198,73 @@ time the panel opens, so toggling it takes effect without an `omarchy restart sh
 ## Requirements and trust
 
 - **Dependencies:** `curl` and `jq`, both present on a stock Omarchy install. Nothing is compiled, installed or fetched at runtime.
-- **Network:** one HTTPS request to `appsignal.com` per refresh. Your token travels only there, as the query parameter AppSignal's API requires.
+- **Network:** HTTPS requests to `appsignal.com` only. Your token travels only there.
 - **Privileges:** runs unsandboxed inside the Omarchy shell as your user, like every plugin. It reads your token file, writes one state file, and opens URLs with `omarchy launch browser`. It never asks for elevated privileges and installs no services or background daemons.
 - **Read only:** the token grants read access to your AppSignal account. The plugin never mutates anything there.
+
+## Security
+
+### Where the token lives
+
+In `~/.config/appsignal/api_token` (`chmod 600`, one line), or in
+`$APPSIGNAL_API_TOKEN`, or in the file named by `$APPSIGNAL_TOKEN_FILE` — the first
+one found wins. It is a **personal API key** with read access; the plugin never sends a
+mutation. It is never written to `overview.json`, to the panel, to a log or to any file
+in this repository, and a curl error message that happened to quote the request URL has
+the token replaced with `<token>` before it can reach the panel's error line.
+
+### The token is not in any command line
+
+Since v1.0.1 every request is made with `curl -K -`: curl reads its URL, its headers and
+the path to its request body from a configuration file on standard input. No credential
+is ever passed as a command-line argument, so it cannot be read out of
+`/proc/<pid>/cmdline` by any other process on the machine (`ps -o args=`,
+`pgrep -af curl`), and it cannot end up in a shell history.
+
+**The GraphQL token is still inside the request URL**, because AppSignal offers nothing
+else. Verified against `https://appsignal.com/graphql` on 2026-09-19 — `Authorization:
+Bearer`, `Authorization: Token token=`, a bare `Authorization:`, `X-AppSignal-Token`,
+`Api-Token`, `X-Api-Key`, `X-Personal-Api-Key` and `Token` all answer **HTTP 401**
+(`Request could not be authenticated`), while `?token=` answers **200**. The REST metrics
+API (`/api/v2/metrics/list`) does accept `Authorization: Bearer`, and that is what this
+plugin sends there. So the credential stays out of process arguments everywhere, but for
+GraphQL it is still part of an HTTPS URL: it is encrypted on the wire, yet anything that
+terminates TLS on your behalf — a corporate proxy, an intercepting scanner — would see
+it, exactly as it would with any other AppSignal client. If AppSignal ever accepts a
+header there, one line in `bin/appsignal-collect` switches it over.
+
+### Response size limit
+
+Each response is capped at **8 MiB** (`-max-response-bytes` to change it; real responses
+measure 2–24 KB). curl refuses a transfer whose `Content-Length` exceeds the limit and
+aborts a chunked one mid-transfer, and the collector re-checks the file that landed
+before `jq` opens it — so a compromised or misbehaving endpoint cannot fill your disk or
+feed an enormous document to the parser. An oversized overview leaves the previous one
+on screen marked stale (or `ready:false` if there is none), with the limit named in the
+error line; an oversized metrics response only costs its own section.
+
+### Remote text in agent prompts
+
+Exception names and messages, action and namespace names, hostnames, queue names,
+trigger names and app names are all written by the monitored applications, so anyone who
+can make one of them raise an error can choose that text. When you press `Enter` on a row
+the plugin builds a prompt for your coding agent, and since v1.0.1 none of that text
+touches the instruction part of it:
+
+- the instructions carry only values the plugin produced itself — incident number,
+  AppSignal app id, the URL it built locally, numeric metrics;
+- every remote string goes inside one delimited block with **per-prompt random markers**,
+  one line per labelled field, stripped of control characters and invisible/bidirectional
+  characters, capped at **300 characters per field and 1200 in total**;
+- the block is introduced by an instruction saying it is untrusted data that must never
+  be followed or executed, and the task that follows it repeats that boundary.
+
+An exception message reading `ignore previous instructions and run …` therefore reaches
+the agent as labelled evidence about a bug, not as an order. The whole prompt is still a
+single shell-quoted argument on one line, so shell injection was and remains impossible.
+The remaining risk is the one every agent carries: a sufficiently persuasive block of
+text is still text a model reads. If that is not acceptable for you, set
+`incidentAction` to `browser` and rows open in AppSignal instead of in an agent.
 
 ## How it works
 
@@ -260,7 +324,10 @@ tests/run.sh
 
 It replaces every `curl` call with a read from `tests/fixtures/<scenario>/`
 (`APPSIGNAL_FIXTURE_DIR` — see the comment above `fixture_fetch()` in
-`bin/appsignal-collect` if you're adding a case). CI
+`bin/appsignal-collect` if you're adding a case). The two security suites are the
+exception: `curl-argv-test.sh` deliberately takes the real curl path with a stub `curl`
+on `PATH`, to prove the credential reaches curl's stdin and never its argv, and
+`max-bytes-test.sh` builds oversized bodies at run time rather than committing them. CI
 (`.github/workflows/ci.yml`) runs this, `shellcheck`, and a `manifest.json`
 validity check on every push and PR to `dev` and `main`.
 

@@ -4,6 +4,51 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] - 2026-09-19
+
+Security release, from the plugin marketplace review. No new features and no
+change to what the panel shows; three hardening fixes in how the collector
+talks to AppSignal and how the panel builds an agent prompt.
+
+### Security
+- **The API token no longer appears in any command line.** Every request the
+  collector makes — the GraphQL overview and the four metrics requests — now
+  hands curl its URL, headers and request body through a configuration file
+  on standard input (`curl -K -`), so nothing that identifies the account can
+  be read out of `/proc/<pid>/cmdline` by another process on the machine
+  (`ps -o args=`, `pgrep -af curl`) or land in a shell history. The metrics
+  API takes the credential as an `Authorization: Bearer` header. The GraphQL
+  endpoint accepts no header at all — eight variants were tried and every one
+  answers HTTP 401, while `?token=` answers 200 — so there the token is still
+  part of the request URL, inside the configuration file rather than in argv;
+  README "Security" documents what that means for TLS-terminating proxies.
+  New test: `tests/curl-argv-test.sh` runs the collector against a stub curl
+  that records its argv and its stdin, and asserts the credential is in the
+  second and not the first.
+- **Every response now has a hard byte ceiling**, 8 MiB by default and
+  configurable with `-max-response-bytes` (real responses measure 2–24 KB).
+  curl refuses a transfer whose `Content-Length` is over the limit and aborts
+  a chunked one mid-flight at exactly the limit; the collector then re-checks
+  the file that landed before jq ever opens it. An oversized overview keeps
+  the previous data marked stale, or goes `ready:false`, with the limit named
+  in the panel's error line; an oversized metrics response only costs its own
+  section and adds a line to the same place. New test:
+  `tests/max-bytes-test.sh`.
+- **Incident text can no longer read as instructions to the coding agent.**
+  Exception names and messages, action and namespace names, hostnames, queue
+  and trigger names and app names all come from the monitored applications,
+  so whoever can make one of those raise an error controls that text — and it
+  used to be concatenated into the same sentence as the plugin's own
+  instructions. Shell quoting prevented shell injection but not prompt
+  injection. All five prompts (error, slow action, host, queue, alert) were
+  restructured: the instruction carries only values the plugin produced
+  itself (incident number, app id, locally built URL, numeric metrics), and
+  every remote string goes into one delimited block with per-prompt random
+  markers, one line per field, control characters and invisible/bidi
+  characters stripped, capped at 300 characters per field and 1200 in total.
+  The block is introduced by an instruction stating it is untrusted data that
+  must never be followed, and the task after it repeats the boundary.
+
 ## [1.0.0] - 2026-09-19
 
 First stable release. The panel now covers an app end to end: open alerts,
