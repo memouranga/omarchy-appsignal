@@ -20,6 +20,14 @@ output=""
 limit=5
 timeout=30
 metrics_timeout=20
+# v1.0.1: hard ceiling for one HTTP response body. The real ones are tiny —
+# measured against production: ~20 KB for the phase 1 GraphQL overview,
+# ~24 KB for the largest phase 2 metrics response (24h of actions, limit 200),
+# ~2 KB for the host ones — so 8 MiB is roughly 340x the worst case we have
+# ever seen and still small enough that a hostile or broken endpoint can not
+# fill a disk. Raise it with -max-response-bytes if an enormous account ever
+# needs it.
+max_bytes=8388608
 cpu_warn=80
 mem_warn=85
 disk_warn=85
@@ -45,6 +53,7 @@ Usage: appsignal-collect [options]
   -limit N                Incident rows per app, also top N slow actions (default: 5)
   -timeout SECS           GraphQL request deadline (default: 30)
   -metrics-timeout SECS   Per-request deadline for the metrics API phase (default: 20)
+  -max-response-bytes N   Reject any response body larger than this (default: 8388608)
   -cpu-warn PCT           Host CPU % warn threshold (default: 80)
   -mem-warn PCT           Host memory % warn threshold (default: 85)
   -disk-warn PCT          Host disk % warn threshold (default: 85)
@@ -62,6 +71,7 @@ while (($#)); do
     -limit|--limit) limit=$2; shift 2 ;;
     -timeout|--timeout) timeout=$2; shift 2 ;;
     -metrics-timeout|--metrics-timeout) metrics_timeout=$2; shift 2 ;;
+    -max-response-bytes|--max-response-bytes) max_bytes=$2; shift 2 ;;
     -cpu-warn|--cpu-warn) cpu_warn=$2; shift 2 ;;
     -mem-warn|--mem-warn) mem_warn=$2; shift 2 ;;
     -disk-warn|--disk-warn) disk_warn=$2; shift 2 ;;
@@ -79,6 +89,9 @@ done
 [[ $mem_warn =~ ^[0-9]+$ ]] || mem_warn=85
 [[ $disk_warn =~ ^[0-9]+$ ]] || disk_warn=85
 [[ $queue_time_warn =~ ^[0-9]+$ ]] || queue_time_warn=30000
+# A ceiling under 1 KB could not hold even an error body, so a typo there
+# falls back to the default instead of failing every request.
+{ [[ $max_bytes =~ ^[0-9]+$ ]] && ((max_bytes >= 1024)); } || max_bytes=8388608
 
 # "mailers, low_priority" -> ["mailers","low_priority"]. Trimmed, empties
 # dropped, so a trailing comma or a blank setting is harmless.
@@ -108,6 +121,15 @@ if [[ -z $token && -r $token_file ]]; then
 fi
 
 auth_help="No AppSignal token. Create a personal API key at https://appsignal.com/users/edit and save it to $token_file (chmod 600)."
+
+# Never let the credential reach stderr, a log or the panel's error line
+# through a message that happened to quote the request URL.
+scrub_secret() {
+  local s
+  s=$(cat)
+  [[ -n ${token:-} ]] && s=${s//"$token"/<token>}
+  printf '%s' "$s"
+}
 
 # Emit a "not ready" overview and stop. Keeps any previous data out on purpose:
 # a missing token is a configuration state, not a transient failure.
@@ -245,6 +267,87 @@ find "$tmp_base" -maxdepth 1 -type d -name 'appsignal-collect.*' -mmin +60 \
 tmp=$(mktemp -d "$tmp_base/appsignal-collect.XXXXXX") || exit 1
 trap 'rm -rf "$tmp"' EXIT INT TERM HUP
 
+# ------------------------------------------------------------------ HTTP
+#
+# v1.0.1 (marketplace security review). Two rules hold for every request in
+# this script, and http_post is the only place that makes one:
+#
+# 1. No credential in argv. curl reads its URL, its headers and the path to
+#    its request body from a configuration file handed to it on stdin
+#    (`curl -K -`), never from the command line. Nothing that identifies the
+#    account — the `Authorization: Bearer` header the metrics API takes, or
+#    the `?token=` query parameter the GraphQL endpoint insists on — can be
+#    read out of /proc/<pid>/cmdline by another process on this machine
+#    (`ps -o args=`, `pgrep -af curl`). The remaining flags in argv (-K, -)
+#    carry nothing.
+#
+#    The GraphQL token still travels inside the request URL, because
+#    AppSignal offers no other channel there. Verified 2026-09-19 against
+#    https://appsignal.com/graphql: `Authorization: Bearer`, `Authorization:
+#    Token token=`, a bare `Authorization:`, `X-AppSignal-Token`,
+#    `Api-Token`, `X-Api-Key`, `X-Personal-Api-Key` and `Token` all answer
+#    HTTP 401 ("Request could not be authenticated"), while `?token=`
+#    answers 200. The REST metrics API does accept a Bearer header, so that
+#    is what it gets. See README "Security" for what that means in practice.
+#
+# 2. A hard byte ceiling. --max-filesize refuses a transfer whose
+#    Content-Length is over the limit and aborts one that goes over it
+#    mid-flight without a Content-Length (chunked): both verified with
+#    curl 8.22 against a local server, the chunked case stopping at exactly
+#    the limit. body_too_large() then re-checks the file that actually
+#    landed, which covers fixture mode and any curl too old to abort
+#    mid-transfer. Nothing reaches jq before that check passes.
+readonly HTTP_TOO_LARGE=oversize
+
+# Quote a value for a curl config file: backslash and double quote are the
+# only two characters with a meaning inside "..." there.
+curl_cfg_escape() {
+  local v=$1
+  v=${v//\\/\\\\}
+  printf '%s' "${v//\"/\\\"}"
+}
+
+body_too_large() {
+  local size
+  size=$(wc -c < "$1" 2>/dev/null) || size=0
+  [[ $size =~ ^[0-9]+$ ]] || size=0
+  ((size > max_bytes))
+}
+
+# http_post URL BODY_FILE OUT_FILE TIMEOUT ERR_FILE [extra header ...]
+# Prints the HTTP status code, $HTTP_TOO_LARGE when the response blew the
+# ceiling, or 000 when the request never produced a response at all.
+http_post() {
+  local url=$1 body_file=$2 out=$3 tmo=$4 err=$5
+  shift 5
+  local code rc h
+  : > "$out"
+  code=$({
+      printf 'url = "%s"\n' "$(curl_cfg_escape "$url")"
+      printf 'request = POST\n'
+      printf 'header = "Content-Type: application/json"\n'
+      for h in "$@"; do printf 'header = "%s"\n' "$(curl_cfg_escape "$h")"; done
+      printf 'data = "@%s"\n' "$(curl_cfg_escape "$body_file")"
+      printf 'output = "%s"\n' "$(curl_cfg_escape "$out")"
+      printf 'write-out = "%%{http_code}"\n'
+      printf 'max-time = %s\n' "$tmo"
+      printf 'max-filesize = %s\n' "$max_bytes"
+      printf 'silent\n'
+      printf 'show-error\n'
+    } | curl -K - 2>"$err")
+  rc=$?
+  # curl exit 63 is CURLE_FILESIZE_EXCEEDED. It still prints a status code
+  # through write-out when the response had already started, so the exit
+  # code — not the status — is what tells an oversized body apart from a
+  # healthy 200.
+  if ((rc == 63)) || body_too_large "$out"; then
+    : > "$out"
+    printf '%s' "$HTTP_TOO_LARGE"
+    return 0
+  fi
+  printf '%s' "${code:-000}"
+}
+
 # v0.7: fixture mode for tests/ (SPEC.md "Tests del colector"). When
 # $APPSIGNAL_FIXTURE_DIR is set, every curl call below is replaced with a
 # read from "$APPSIGNAL_FIXTURE_DIR/<name>.json" (the response body, copied
@@ -258,6 +361,10 @@ fixture_fetch() {
   local name=$1 out=$2
   local body="$APPSIGNAL_FIXTURE_DIR/$name.json" status="$APPSIGNAL_FIXTURE_DIR/$name.status"
   if [[ -f $body ]]; then cp "$body" "$out"; else : > "$out"; fi
+  # v1.0.1: the byte ceiling applies to a fixture exactly like it applies to
+  # a real download, so tests/max-bytes-test.sh can exercise the rejection
+  # path without a network.
+  if body_too_large "$out"; then : > "$out"; printf '%s' "$HTTP_TOO_LARGE"; return 0; fi
   if [[ -f $status ]]; then head -n1 "$status" | tr -d '[:space:]'
   elif [[ -f $body ]]; then echo 200
   else echo 000
@@ -265,7 +372,7 @@ fixture_fetch() {
 }
 
 run_query() {
-  local gql=$1 body code
+  local gql=$1
   if [[ -n ${APPSIGNAL_FIXTURE_DIR:-} ]]; then
     # $gql is the query text itself, so it — not some counter — is the
     # reliable way to tell the retry apart from the original call: run_query
@@ -285,19 +392,22 @@ run_query() {
     fixture_fetch "$name" "$tmp/resp.json"
     return
   fi
-  body=$(jq -n --arg q "$gql" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}')
-  # curl already prints "000" through -w when it never got a response, and it
-  # exits non-zero in the same breath. A trailing `|| echo 000` therefore
-  # appended a SECOND "000" to this function's stdout, and the caller read
-  # "000000" — which matches neither the `== 000` unreachable branch nor 200,
-  # so a machine with no network showed "AppSignal returned HTTP 000000."
-  # instead of the unreachable message with curl's own explanation. Capture
-  # the code and default it only when curl printed nothing at all.
-  code=$(curl -sS --max-time "$timeout" \
-    -H "Content-Type: application/json" \
-    -X POST "$ENDPOINT?token=$token" \
-    -d "$body" -o "$tmp/resp.json" -w '%{http_code}' 2>"$tmp/curl.err")
-  printf '%s' "${code:-000}"
+  # The request body is written to a file rather than passed with -d: with
+  # `curl -K -` stdin already carries the configuration, and a file keeps the
+  # query out of argv too.
+  jq -n --arg q "$gql" --argjson limit "$limit" '{query:$q, variables:{limit:$limit}}' > "$tmp/req.json"
+  # curl already prints "000" through write-out when it never got a response,
+  # and it exits non-zero in the same breath. A trailing `|| echo 000`
+  # therefore appended a SECOND "000" to this function's stdout, and the
+  # caller read "000000" — which matches neither the `== 000` unreachable
+  # branch nor 200, so a machine with no network showed "AppSignal returned
+  # HTTP 000000." instead of the unreachable message with curl's own
+  # explanation. http_post defaults the code only when curl printed nothing.
+  #
+  # ?token= is the only authentication GraphQL accepts (see the HTTP section
+  # above); it is inside the config file on stdin, not in argv.
+  http_post "$ENDPOINT?token=$token" "$tmp/req.json" "$tmp/resp.json" \
+    "$timeout" "$tmp/curl.err"
 }
 
 gql_failed() {
@@ -345,8 +455,16 @@ emit_stale() {
   fi
 }
 
+# v1.0.1: an oversized body never reaches jq — it was discarded while it was
+# still downloading. Same path as any other transient failure: the panel
+# keeps the previous overview marked stale, or goes ready:false with this
+# message if there is nothing to keep.
+if [[ $http == "$HTTP_TOO_LARGE" ]]; then
+  emit_stale "AppSignal sent more than the $max_bytes-byte response limit; the reply was discarded."
+  exit 0
+fi
 if [[ $http == 000 ]]; then
-  emit_stale "AppSignal unreachable: $(head -c 200 "$tmp/curl.err")"
+  emit_stale "AppSignal unreachable: $(head -c 200 "$tmp/curl.err" | scrub_secret)"
   exit 0
 fi
 if [[ $http == 401 || $http == 403 ]]; then
@@ -548,6 +666,20 @@ else
   phase2_ids=("${all_app_ids[@]:0:$MAX_PHASE2_APPS}")
 fi
 
+# v1.0.1: a phase 2 response over the byte ceiling only costs its own
+# section (health null, no rows), like any other phase 2 failure — but it is
+# not silent: each worker drops a marker file, and the merge below turns any
+# marker into a line on the panel's error row. Workers run in parallel
+# subshells, so a shell variable could not carry this back.
+note_oversize() {
+  local code
+  for code in "$@"; do
+    [[ $code == "$HTTP_TOO_LARGE" ]] || continue
+    : > "$tmp/oversize.$app_id"
+    return 0
+  done
+}
+
 fetch_phase2_app() {
   local app_id=$1 health_out=$2 slow_out=$3 hosts_out=$4 jobs_out=$5
   local from1 to1 from24 to24 from15 to15 health_body slow_body hc sc
@@ -588,13 +720,14 @@ fetch_phase2_app() {
       hc=$(fixture_fetch "health-$app_id" "$health_out.raw")
       sc=$(fixture_fetch "slow-$app_id" "$slow_out.raw")
     else
-      hc=$(curl -sS --max-time "$metrics_timeout" \
-        -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-        -X POST "$METRICS_ENDPOINT" -d "$health_body" -o "$health_out.raw" -w '%{http_code}' 2>/dev/null) || hc=000
-      sc=$(curl -sS --max-time "$metrics_timeout" \
-        -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-        -X POST "$METRICS_ENDPOINT" -d "$slow_body" -o "$slow_out.raw" -w '%{http_code}' 2>/dev/null) || sc=000
+      printf '%s' "$health_body" > "$health_out.body"
+      printf '%s' "$slow_body" > "$slow_out.body"
+      hc=$(http_post "$METRICS_ENDPOINT" "$health_out.body" "$health_out.raw" \
+        "$metrics_timeout" "$health_out.err" "Authorization: Bearer $token")
+      sc=$(http_post "$METRICS_ENDPOINT" "$slow_out.body" "$slow_out.raw" \
+        "$metrics_timeout" "$slow_out.err" "Authorization: Bearer $token")
     fi
+    note_oversize "$hc" "$sc"
 
     if [[ $hc == 200 ]] && jq -e '.rows and (.error | not)' "$health_out.raw" >/dev/null 2>&1; then
       jq '
@@ -669,13 +802,14 @@ fetch_phase2_app() {
     hmc=$(fixture_fetch "hosts-hm-$app_id" "$hosts_out.hm.raw")
     dc=$(fixture_fetch "hosts-disk-$app_id" "$hosts_out.disk.raw")
   else
-    hmc=$(curl -sS --max-time "$metrics_timeout" \
-      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-      -X POST "$METRICS_ENDPOINT" -d "$hm_body" -o "$hosts_out.hm.raw" -w '%{http_code}' 2>/dev/null) || hmc=000
-    dc=$(curl -sS --max-time "$metrics_timeout" \
-      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-      -X POST "$METRICS_ENDPOINT" -d "$disk_body" -o "$hosts_out.disk.raw" -w '%{http_code}' 2>/dev/null) || dc=000
+    printf '%s' "$hm_body" > "$hosts_out.hm.body"
+    printf '%s' "$disk_body" > "$hosts_out.disk.body"
+    hmc=$(http_post "$METRICS_ENDPOINT" "$hosts_out.hm.body" "$hosts_out.hm.raw" \
+      "$metrics_timeout" "$hosts_out.hm.err" "Authorization: Bearer $token")
+    dc=$(http_post "$METRICS_ENDPOINT" "$hosts_out.disk.body" "$hosts_out.disk.raw" \
+      "$metrics_timeout" "$hosts_out.disk.err" "Authorization: Bearer $token")
   fi
+  note_oversize "$hmc" "$dc"
 
   if [[ $hmc == 200 && $dc == 200 ]] \
      && jq -e '.rows and (.error | not)' "$hosts_out.hm.raw" >/dev/null 2>&1 \
@@ -785,10 +919,11 @@ fetch_phase2_app() {
   if [[ -n ${APPSIGNAL_FIXTURE_DIR:-} ]]; then
     jc=$(fixture_fetch "jobs-$app_id" "$jobs_out.raw")
   else
-    jc=$(curl -sS --max-time "$metrics_timeout" \
-      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-      -X POST "$METRICS_ENDPOINT" -d "$jobs_body" -o "$jobs_out.raw" -w '%{http_code}' 2>/dev/null) || jc=000
+    printf '%s' "$jobs_body" > "$jobs_out.body"
+    jc=$(http_post "$METRICS_ENDPOINT" "$jobs_out.body" "$jobs_out.raw" \
+      "$metrics_timeout" "$jobs_out.err" "Authorization: Bearer $token")
   fi
+  note_oversize "$jc"
 
   if [[ $jc == 200 ]] && jq -e '.rows and (.error | not)' "$jobs_out.raw" >/dev/null 2>&1; then
     jq --argjson limit "$limit" --argjson queueTimeWarn "$queue_time_warn" \
@@ -832,6 +967,11 @@ if ((${#phase2_ids[@]} > 0)); then
   wait
 fi
 
+phase2_error=""
+if compgen -G "$tmp/oversize.*" >/dev/null 2>&1; then
+  phase2_error="Some AppSignal metric responses were larger than the $max_bytes-byte limit and were discarded."
+fi
+
 {
   echo '{}'
   for app_id in "${phase2_ids[@]}"; do
@@ -849,7 +989,7 @@ fi
 # v0.5/v0.6: merge hosts and queues, then recompute totals.hostsWarn and
 # totals.queuesWarn (per app and global) now that this data exists —
 # phase1's .totals was built before it landed.
-jq --slurpfile p2 "$tmp/phase2.json" '
+jq --slurpfile p2 "$tmp/phase2.json" --arg p2err "$phase2_error" '
   ($p2[0] // {}) as $p2
   | .organizations = [
       .organizations[]
@@ -867,4 +1007,7 @@ jq --slurpfile p2 "$tmp/phase2.json" '
     ]
   | .totals.hostsWarn = ([.organizations[].apps[].totals.hostsWarn] | add // 0)
   | .totals.queuesWarn = ([.organizations[].apps[].totals.queuesWarn] | add // 0)
+  # v1.0.1: keep whatever phase 1 already had to say (a degraded schema) and
+  # append the oversized-response note, so neither hides the other.
+  | .error = ([(.error // ""), $p2err] | map(select(. != "")) | join(" "))
 ' "$tmp/phase1.json" | write_out
