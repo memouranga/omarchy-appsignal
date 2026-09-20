@@ -18,6 +18,9 @@ Item {
   readonly property string stateDir: stateHome + "/omarchy/appsignal"
   readonly property string overviewPath: stateDir + "/overview.json"
   readonly property string prefsPath: stateDir + "/panel.json"
+  // v0.7: a flag file that turns dry-run on without touching the shell's
+  // environment (which would need `omarchy restart shell` to pick up).
+  readonly property string dryRunFlagPath: stateDir + "/dry-run"
   readonly property string collectorPath: {
     var url = String(Qt.resolvedUrl("bin/appsignal-collect"))
     return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
@@ -27,6 +30,19 @@ Item {
   property int dataRevision: 0
   property int refreshIntervalSec: Math.max(30, Number(setting("refreshIntervalSec", 120)) || 120)
   property int incidentsPerApp: Math.max(1, Number(setting("incidentsPerApp", 5)) || 5)
+  // v0.5: host warn thresholds, forwarded to the collector so it can compute
+  // hosts[].warn and totals.hostsWarn itself (same pattern as incidentsPerApp).
+  property int cpuWarn: Math.min(100, Math.max(1, Number(setting("cpuWarn", 80)) || 80))
+  property int memWarn: Math.min(100, Math.max(1, Number(setting("memWarn", 85)) || 85))
+  property int diskWarn: Math.min(100, Math.max(1, Number(setting("diskWarn", 85)) || 85))
+  // v0.6: job queue wait-time warn threshold (ms), same pattern as the host
+  // warn thresholds — forwarded to the collector so it can compute
+  // queues[].warn and totals.queuesWarn itself.
+  property int queueTimeWarn: Math.max(1, Number(setting("queueTimeWarn", 30000)) || 30000)
+  // v0.6: comma-separated queue names the collector leaves out entirely, for
+  // queues that are noise on this machine's bar (e.g. a queue that only ever
+  // carries scheduled work). Empty by default.
+  readonly property string ignoreQueues: String(setting("ignoreQueues", "") || "")
   // "pinned" (default) shows only apps pinned in AppSignal, when at least one
   // exists; "all" always shows every app. No boolean setting type exists in
   // this Omarchy's manifest schema, so this reads as an enum.
@@ -39,6 +55,57 @@ Item {
   function setting(name, fallback) {
     var value = root.settings ? root.settings[name] : undefined
     return value === undefined || value === null ? fallback : value
+  }
+
+  // ------------------------------------------------------------- dry-run
+  //
+  // v0.7 (SPEC.md "Dry-run"): every action that would otherwise run a real
+  // shell command (agent prompt, browser) goes through Panel.qml's single
+  // runAction(cmd), which checks this property. Dry-run is on when either
+  // $OMARCHY_APPSIGNAL_DRY_RUN=1 (read once, at startup — this is an
+  // environment variable, the shell only sees it on launch) or the flag file
+  // below exists, watched live so it can be toggled without a shell restart.
+  readonly property bool dryRunEnv: Quickshell.env("OMARCHY_APPSIGNAL_DRY_RUN") === "1"
+  property bool dryRunFlagPresent: false
+  readonly property bool dryRun: root.dryRunEnv || root.dryRunFlagPresent
+
+  FileView {
+    id: dryRunFlagFile
+    path: root.dryRunFlagPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.dryRunFlagPresent = true
+    onLoadFailed: root.dryRunFlagPresent = false
+  }
+
+  // ------------------------------------------------------------ sections
+  //
+  // v0.7: which sections are visible and in what order. Comma list, read
+  // left to right; unknown keys are dropped and duplicates collapsed to
+  // their first occurrence. Falls back to every section, in the shipped
+  // order, when the setting is empty or ends up with nothing valid in it.
+  readonly property var validSections: ["alerts", "errors", "performance", "servers", "uptime", "jobs", "checkins", "deploy"]
+  readonly property var defaultSectionOrder: root.validSections.slice()
+  readonly property var sectionOrder: {
+    var raw = String(setting("sections", root.defaultSectionOrder.join(",")) || "")
+    var parts = raw.split(",")
+    var out = []
+    for (var i = 0; i < parts.length; i++) {
+      var key = parts[i].trim().toLowerCase()
+      if (key === "") continue
+      if (root.validSections.indexOf(key) < 0) continue
+      if (out.indexOf(key) >= 0) continue
+      out.push(key)
+    }
+    return out.length > 0 ? out : root.defaultSectionOrder
+  }
+
+  // v0.7: order of the app tabs. "attention" (default) = apps with something
+  // wrong first, as before; "name" = alphabetical, stable; "pinned" = the
+  // order AppSignal itself returns (no client-side sort at all).
+  readonly property string appOrderSetting: {
+    var v = String(setting("appOrder", "attention") || "attention").toLowerCase()
+    return (v === "name" || v === "pinned") ? v : "attention"
   }
 
   // ------------------------------------------------------------- refresh
@@ -106,12 +173,29 @@ Item {
     if (now - root.lastRunMs < 15000) return
     root.lastRunMs = now
     updateProcess.command = [root.collectorPath, "-output", root.overviewPath,
-                             "-limit", String(root.incidentsPerApp)]
+                             "-limit", String(root.incidentsPerApp),
+                             "-cpu-warn", String(root.cpuWarn),
+                             "-mem-warn", String(root.memWarn),
+                             "-disk-warn", String(root.diskWarn),
+                             "-queue-time-warn", String(root.queueTimeWarn),
+                             "-ignore-queues", root.ignoreQueues,
+                             // v0.7: sections the panel isn't showing don't need
+                             // their phase-2 metrics request either.
+                             "-sections", root.sectionOrder.join(",")]
     updateProcess.running = true
   }
 
   function refreshNow() { root.lastRunMs = 0; root.runUpdate() }
-  function refreshOnOpen() { root.runUpdate() }
+  // v0.7: also re-stat the dry-run flag file on every open. watchChanges on a
+  // FileView tracks *content* changes to a file that already existed when the
+  // watch was set up; it does not reliably notice the file appearing or
+  // disappearing afterward (confirmed by hand: touching or rm'ing the flag
+  // while the shell kept running did not flip dryRunFlagPresent — only a
+  // fresh reload() or a shell restart did). Doing it here means the one
+  // moment SPEC.md actually cares about — opening the panel to check for
+  // "DRY RUN" before pressing Enter/o on a row — is always accurate, with no
+  // shell restart required.
+  function refreshOnOpen() { root.runUpdate(); dryRunFlagFile.reload() }
 
   // ------------------------------------------------------------ derived
 
@@ -157,11 +241,54 @@ Item {
           monitors: Array.isArray(a.monitors) ? a.monitors : [],
           checkIns: Array.isArray(a.checkIns) ? a.checkIns : [],
           lastDeploy: a.lastDeploy && typeof a.lastDeploy === "object" ? a.lastDeploy : null,
-          totals: a.totals && typeof a.totals === "object" ? a.totals : ({})
+          totals: a.totals && typeof a.totals === "object" ? a.totals : ({}),
+          // v0.4: 1h health (throughput/errorRate/meanMs) and 24h slowest
+          // actions, only populated for apps the collector's metrics phase
+          // covered (pinned apps, or the fallback first 6). null/[] otherwise.
+          health: a.health && typeof a.health === "object" ? a.health : null,
+          // v0.4.1: ranked by impact (totalMs = meanMs * count), split web vs.
+          // background. slowActions is kept as their concatenation only for
+          // compatibility; the panel renders the two lists separately.
+          slowWeb: Array.isArray(a.slowWeb) ? a.slowWeb : [],
+          slowBackground: Array.isArray(a.slowBackground) ? a.slowBackground : [],
+          slowActions: Array.isArray(a.slowActions) ? a.slowActions : [],
+          // v0.5: one entry per host reporting metrics for this app; [] when
+          // the app was outside the collector's metrics phase or that host
+          // query failed for it. Each entry: hostname, shortName, cpuPct,
+          // memPct, memUsedMb, load1, diskPct, diskMount, swapPct, swapUsedMb,
+          // warn. The *Pct fields are null on hosts that never publish a memory
+          // or swap total (every container host checked), which is why the
+          // absolute *UsedMb fields exist — see SPEC.md "v0.5".
+          hosts: Array.isArray(a.hosts) ? a.hosts : [],
+          // v0.6: one entry per background queue (ActiveJob), from the same
+          // metrics phase as health/slowActions/hosts — [] outside that
+          // phase or on a failed request. Each entry: name, processed,
+          // failed, queueTimeMs (nullable, the floor wait — see SPEC.md
+          // "v0.6"), queueTimeHighMs (nullable p95), scheduled, warn. Warning
+          // queues first, scheduled ones last; top incidentsPerApp and the
+          // `ignoreQueues` filter already applied by the collector.
+          queues: Array.isArray(a.queues) ? a.queues : [],
+          // v0.6: open (OPEN/WARMUP) anomaly-detection alerts, straight from
+          // the GraphQL phase — always populated when ready (not gated by
+          // the metrics phase). Each entry: id, state, triggerName, metric,
+          // message, lastValue, peakValue, openedAt, url.
+          alerts: Array.isArray(a.alerts) ? a.alerts : []
         })
       }
     }
-    out.sort(function(x, y) { return root.attention(y) - root.attention(x) })
+    // v0.7: "pinned" keeps organizations[].apps[] exactly as the API returned
+    // them (no sort at all); "name" and "attention" (default) both need a
+    // stable sort, which Array.prototype.sort has guaranteed since ES2019.
+    if (root.appOrderSetting === "name") {
+      out.sort(function(x, y) {
+        var xn = x.name.toLowerCase(), yn = y.name.toLowerCase()
+        if (xn < yn) return -1
+        if (xn > yn) return 1
+        return 0
+      })
+    } else if (root.appOrderSetting === "attention") {
+      out.sort(function(x, y) { return root.attention(y) - root.attention(x) })
+    }
     return out
   }
 
@@ -184,14 +311,17 @@ Item {
 
   function attention(app) {
     var t = app.totals || {}
-    return Number(t.monitorsDown || 0) * 100 + Number(t.checkInsFailing || 0) * 50 + Number(t.errors || 0) * 2 + Number(t.perf || 0)
+    return Number(t.monitorsDown || 0) * 100 + Number(t.alertsOpen || 0) * 90 +
+      Number(t.checkInsFailing || 0) * 50 + Number(t.hostsWarn || 0) * 20 +
+      Number(t.queuesWarn || 0) * 10 + Number(t.errors || 0) * 2 + Number(t.perf || 0)
   }
 
   // Totals over the visible apps only, so a pinned-down view doesn't have the
   // bar dot or tooltip alarm about apps the panel isn't even showing.
   readonly property var visibleTotals: {
     var list = root.apps
-    var out = { errors: 0, perf: 0, monitors: 0, monitorsDown: 0, checkIns: 0, checkInsFailing: 0 }
+    var out = { errors: 0, perf: 0, monitors: 0, monitorsDown: 0, checkIns: 0, checkInsFailing: 0,
+                hostsWarn: 0, queuesWarn: 0, alertsOpen: 0 }
     for (var i = 0; i < list.length; i++) {
       var t = list[i].totals || {}
       out.errors += Number(t.errors || 0)
@@ -200,6 +330,9 @@ Item {
       out.monitorsDown += Number(t.monitorsDown || 0)
       out.checkIns += Number(t.checkIns || 0)
       out.checkInsFailing += Number(t.checkInsFailing || 0)
+      out.hostsWarn += Number(t.hostsWarn || 0)
+      out.queuesWarn += Number(t.queuesWarn || 0)
+      out.alertsOpen += Number(t.alertsOpen || 0)
     }
     return out
   }
@@ -208,8 +341,15 @@ Item {
   readonly property int openPerf: Number(visibleTotals.perf || 0)
   readonly property int monitorsDown: Number(visibleTotals.monitorsDown || 0)
   readonly property int checkInsFailing: Number(visibleTotals.checkInsFailing || 0)
-  readonly property bool urgent: monitorsDown > 0 || checkInsFailing > 0
-  readonly property bool attentionNeeded: urgent || openErrors > 0
+  readonly property int hostsWarn: Number(visibleTotals.hostsWarn || 0)
+  readonly property int queuesWarn: Number(visibleTotals.queuesWarn || 0)
+  readonly property int alertsOpen: Number(visibleTotals.alertsOpen || 0)
+  readonly property bool urgent: monitorsDown > 0 || checkInsFailing > 0 || alertsOpen > 0
+  // v0.6: queuesWarn lights the dot exactly like hostsWarn. It only counts
+  // queues with failed jobs or a *real* wait over the threshold — a queue full
+  // of deliberately delayed jobs is flagged `scheduled` by the collector and
+  // never warns, so this no longer fires permanently on a mailers queue.
+  readonly property bool attentionNeeded: urgent || openErrors > 0 || hostsWarn > 0 || queuesWarn > 0
 
   // ------------------------------------------------------- app selection
 

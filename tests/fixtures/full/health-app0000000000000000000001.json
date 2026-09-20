@@ -1,0 +1,8 @@
+{
+  "rows": [
+    { "data": { "throughput": 1234 } },
+    { "data": { "errorRate": 0.07 } },
+    { "data": { "meanMs": 182.3 } }
+  ],
+  "error": null
+}

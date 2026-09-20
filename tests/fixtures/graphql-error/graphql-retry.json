@@ -1,0 +1,28 @@
+{
+  "data": {
+    "viewer": {
+      "name": "Dev Example",
+      "email": "dev@example.com",
+      "organizations": [
+        {
+          "id": "org0000000000000000000001",
+          "name": "Acme",
+          "slug": "acme",
+          "apps": [
+            {
+              "id": "app0000000000000000000001",
+              "name": "Acme Web",
+              "environment": "production",
+              "status": "green",
+              "viewerPinned": true,
+              "lastPushProcessedAt": "2026-09-10T12:00:00Z",
+              "exceptionIncidents": [],
+              "performanceIncidents": [],
+              "uptimeMonitors": []
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

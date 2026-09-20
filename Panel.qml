@@ -32,10 +32,21 @@ Panel {
   readonly property string glyphBug: "󰃤"        // mdi-bug (U+F00E4)
   readonly property string glyphUptime: "󰖟"     // globe
   readonly property string glyphRefresh: "󰑐"    // refresh
+  readonly property string glyphSpeedometer: "󰓅" // mdi-speedometer (U+F04C5)
+  readonly property string glyphServer: "󰒋"      // mdi-server (U+F048B)
+  readonly property string glyphTray: "󱊖"        // mdi-tray-full (U+F1296)
+  readonly property string glyphTimerCheck: "󱫐"  // mdi-timer-check (U+F1AD0)
+  readonly property string glyphBell: "󰂚"         // mdi-bell (U+F009A)
 
   // ---------------------------------------------------------------- rows
 
   readonly property var apps: root.asList(data.apps)
+
+  // v0.7: which sections are on and in what order — the single source of
+  // truth for both focusRows below and the section Loader in the selected-
+  // app column further down. Crosses the `var` property boundary from Main,
+  // hence asList() (see asList()'s own comment).
+  readonly property var sectionOrder: root.asList(data.sectionOrder)
 
   // Mirrored onto the root: inside a Button delegate `data` resolves to the
   // item's own default property, not this file's Main instance (same reason
@@ -57,17 +68,71 @@ Panel {
   }
 
   // Only the selected app's rows are ever on screen, so this is the one list
-  // j/k walks: every error row followed by every monitor row of that app.
+  // j/k walks: every row of every visible section, in root.sectionOrder.
+  //
+  // v0.7: order used to be fixed (alerts, errors, perf, hosts, monitors,
+  // queues, check-ins); now it follows root.sectionOrder (the `sections`
+  // setting) so a reordered or narrowed panel still gets a matching cursor
+  // order. appSection.flatOffset() in the selected-app column below walks
+  // the same root.sectionOrder to compute each row's starting index — the
+  // two must never disagree, or Enter/o would act on the wrong row.
   readonly property var focusRows: {
     var rows = []
     var app = root.selectedApp
     if (!app) return rows
-    var errs = root.asList(app.errors)
-    for (var j = 0; j < errs.length; j++)
-      rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
-    var mons = root.asList(app.monitors)
-    for (var k = 0; k < mons.length; k++)
-      rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
+    var order = root.sectionOrder
+    for (var s = 0; s < order.length; s++) {
+      var key = order[s]
+      if (key === "alerts") {
+        // ALERTS (v0.6): right-click/`o` always opens app.url (no confirmed
+        // per-trigger route — see SPEC.md).
+        var alerts = root.asList(app.alerts)
+        for (var a = 0; a < alerts.length; a++)
+          rows.push({ kind: "alert", app: app, item: alerts[a], url: alerts[a].url })
+      } else if (key === "errors") {
+        var errs = root.asList(app.errors)
+        for (var j = 0; j < errs.length; j++)
+          rows.push({ kind: "error", app: app, item: errs[j], url: errs[j].url })
+      } else if (key === "performance") {
+        // Open incidents take priority (rare — AppSignal auto-closes them);
+        // with none open, fall back to the two 24h impact-ranked lists the
+        // collector's metrics phase computed (web first, then background).
+        // Never both perf incidents and slow-action rows at once.
+        var perf = root.asList(app.perf)
+        if (perf.length > 0) {
+          for (var p = 0; p < perf.length; p++)
+            rows.push({ kind: "perf", app: app, item: perf[p], url: perf[p].url })
+        } else {
+          var slowWeb = root.asList(app.slowWeb)
+          for (var sw = 0; sw < slowWeb.length; sw++)
+            rows.push({ kind: "slow", app: app, item: slowWeb[sw], url: app.perfUrl })
+          var slowBg = root.asList(app.slowBackground)
+          for (var sb = 0; sb < slowBg.length; sb++)
+            rows.push({ kind: "slow", app: app, item: slowBg[sb], url: app.perfUrl })
+        }
+      } else if (key === "servers") {
+        // SERVERS (v0.5): right-click/`o` always opens app.url (the real
+        // host-metrics route could not be confirmed — see SPEC.md).
+        var hosts = root.asList(app.hosts)
+        for (var h = 0; h < hosts.length; h++)
+          rows.push({ kind: "host", app: app, item: hosts[h], url: app.url })
+      } else if (key === "uptime") {
+        var mons = root.asList(app.monitors)
+        for (var k = 0; k < mons.length; k++)
+          rows.push({ kind: "monitor", app: app, item: mons[k], url: mons[k].panelUrl })
+      } else if (key === "jobs") {
+        // JOBS (v0.6): right-click/`o` opens app.url.
+        var queues = root.asList(app.queues)
+        for (var q = 0; q < queues.length; q++)
+          rows.push({ kind: "queue", app: app, item: queues[q], url: app.url })
+      } else if (key === "checkins") {
+        // CHECK-INS (v0.6): always the browser, never the agent.
+        var checkIns = root.asList(app.checkIns)
+        for (var c = 0; c < checkIns.length; c++)
+          rows.push({ kind: "checkin", app: app, item: checkIns[c], url: checkIns[c].url })
+      }
+      // "deploy" is a footer line, not a cursor row.
+    }
     return rows
   }
 
@@ -92,7 +157,8 @@ Panel {
 
   function appHasAlert(app) {
     var t = app ? app.totals || {} : {}
-    return Number(t.errors || 0) > 0 || Number(t.monitorsDown || 0) > 0
+    return Number(t.errors || 0) > 0 || Number(t.monitorsDown || 0) > 0 || Number(t.hostsWarn || 0) > 0 ||
+      Number(t.alertsOpen || 0) > 0 || Number(t.checkInsFailing || 0) > 0 || Number(t.queuesWarn || 0) > 0
   }
 
   // Delegates inside the Repeater below sit in their own implicit Component,
@@ -196,9 +262,26 @@ Panel {
 
   // Row delegates register themselves so the cursor can scroll to a row
   // that is currently off-screen without guessing at layout geometry.
-  property var rowItems: ({})
-  function registerRow(index, item) { root.rowItems[index] = item }
-  function unregisterRow(index, item) { if (root.rowItems[index] === item) delete root.rowItems[index] }
+  //
+  // The registry is keyed by item identity, not by flatIndex: a delegate's
+  // flatIndex is a live binding (the PERFORMANCE and UPTIME rows offset
+  // themselves by how many rows sit above them), so it routinely changes
+  // after Component.onCompleted — a Repeater can finish building the slow-
+  // action rows while `errors` is still empty, then shift them from 0-4 to
+  // 5-9 once the data lands. An index-keyed map recorded the stale indices
+  // and the later rows became unreachable, so the panel never scrolled to
+  // them (G, or j/k past the fold, moved the cursor off-screen silently).
+  property var rowItems: []
+  function registerRow(item) { if (item && root.rowItems.indexOf(item) < 0) root.rowItems.push(item) }
+  function unregisterRow(item) {
+    var at = root.rowItems.indexOf(item)
+    if (at >= 0) root.rowItems.splice(at, 1)
+  }
+  function rowItemAt(index) {
+    for (var i = 0; i < root.rowItems.length; i++)
+      if (root.rowItems[i] && root.rowItems[i].flatIndex === index) return root.rowItems[i]
+    return null
+  }
 
   function moveRows(dy) {
     var n = root.focusRows.length
@@ -232,14 +315,69 @@ Panel {
   // rows always open in the browser regardless of this setting.
   readonly property string incidentAction: String(root.setting("incidentAction", "agent") || "agent")
 
+  // v0.5: host warn thresholds, read straight from settings the same way as
+  // incidentAction — used only to color individual metrics in a SERVERS row;
+  // the collector already decided hosts[].warn (the tab dot / attention
+  // aggregate) using these same values passed as -cpu-warn/-mem-warn/-disk-warn.
+  function clampWarnPct(v, fallback) {
+    var n = Number(v)
+    return isFinite(n) && n > 0 ? Math.min(100, Math.max(1, n)) : fallback
+  }
+  readonly property int cpuWarnPct: root.clampWarnPct(root.setting("cpuWarn", 80), 80)
+  readonly property int memWarnPct: root.clampWarnPct(root.setting("memWarn", 85), 85)
+  readonly property int diskWarnPct: root.clampWarnPct(root.setting("diskWarn", 85), 85)
+
   function activateItem(row, viaBrowser) {
     if (!row) return
     if (row.kind === "error" && !viaBrowser && root.incidentAction !== "browser") {
       root.investigate(row)
       return
     }
+    if ((row.kind === "perf" || row.kind === "slow") && !viaBrowser && root.incidentAction !== "browser") {
+      root.investigatePerf(row)
+      return
+    }
+    if (row.kind === "host" && !viaBrowser && root.incidentAction !== "browser") {
+      root.investigateHost(row)
+      return
+    }
+    if (row.kind === "alert" && !viaBrowser && root.incidentAction !== "browser") {
+      root.investigateAlert(row)
+      return
+    }
+    if (row.kind === "queue" && !viaBrowser && root.incidentAction !== "browser") {
+      root.investigateQueue(row)
+      return
+    }
+    // CHECK-INS: always the browser (SPEC.md v0.6), never the agent —
+    // unlike every other row kind, incidentAction does not apply here.
     root.openUrl(row.url)
   }
+
+  // v0.7 (SPEC.md "Dry-run"): the one and only place that runs a real shell
+  // command. Every other function in this file that used to run one
+  // directly on the bar (agent prompt, browser) now calls this instead. In
+  // dry-run — $OMARCHY_APPSIGNAL_DRY_RUN=1, or the flag file at
+  // ~/.local/state/omarchy/appsignal/dry-run — the command is only logged,
+  // never executed, and the panel's hero shows "DRY RUN" (see heroMeta())
+  // so a tester can confirm it's safe before pressing Enter/o on a row.
+  function runAction(cmd) {
+    if (!root.bar) return
+    if (data.dryRun) {
+      console.log("memong.appsignal DRY-RUN:", cmd)
+      return
+    }
+    root.bar.run(cmd)
+  }
+
+  // SPEC.md and the README both promise the agent a ONE-LINE prompt, but the
+  // fields it is built from come from AppSignal verbatim, and an exception
+  // message routinely carries newlines (Rails puts request.formats and
+  // request.variant on their own lines). shellQuote kept that a single
+  // argument, so nothing was ever unsafe — but the command stopped being one
+  // line, and an agent that seeds an interactive prompt can stop reading at
+  // the first newline. Collapse every run of whitespace into one space.
+  function oneLine(s) { return String(s || "").replace(/\s+/g, " ").trim() }
 
   // Builds the one-line prompt from SPEC.md and hands it to the user's
   // default coding agent in a new terminal (same as `omarchy agent crash`),
@@ -271,20 +409,174 @@ Panel {
       "samples; explain the probable root cause and propose a fix. Do not change the " +
       "incident state or severity unless I ask.")
 
-    root.bar.run("omarchy agent prompt " + Util.shellQuote(parts.join(" ")))
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
+    root.close()
+  }
+
+  // Same pattern as investigate(), for a PERFORMANCE row: an open performance
+  // incident ("perf") or one of the 24h slowest actions ("slow"). The slow-
+  // action wording is the one from SPEC.md verbatim; the open-incident one
+  // mirrors investigate()'s error wording since AppSignal rarely leaves one
+  // open (both apps we develop against have 0).
+  function investigatePerf(row) {
+    if (!row || !root.bar) return
+    var it = row.item || {}
+    var app = row.app || {}
+
+    var appPart = String(app.name || "")
+    if (app.environment) appPart += " (" + app.environment + ")"
+
+    var action = String(it.action || "")
+    var namespace = String(it.namespace || "")
+    var count = Number(it.count || 0)
+    var url = String(it.url || app.perfUrl || "")
+
+    var parts
+    if (row.kind === "slow") {
+      var meanMs = Math.round(Number(it.meanMs || 0))
+      var totalMs = Number(it.totalMs || (Number(it.meanMs || 0) * count))
+      parts = ["Investigate slow action " + action + " (" + namespace + ") in app " + appPart +
+        ": mean " + meanMs + " ms over " + root.plural(count, "request", "requests") +
+        " in the last 24h, totaling " + root.humanizePerDay(totalMs) + "."]
+    } else {
+      var head = "Investigate AppSignal performance incident"
+      if (it.number) head += " #" + it.number
+      if (action !== "") head += " \"" + action + "\""
+      if (appPart !== "") head += " in app " + appPart
+      var detail = []
+      if (namespace !== "") detail.push("namespace " + namespace)
+      if (Number(it.mean || 0) > 0) detail.push("mean " + Math.round(Number(it.mean)) + " ms")
+      if (count > 0) detail.push(count + " occurrences")
+      if (it.lastOccurredAt) detail.push("last at " + it.lastOccurredAt)
+      parts = [head + (detail.length > 0 ? ", " + detail.join(", ") : "") + "."]
+    }
+
+    if (url !== "") parts.push("URL: " + url + ".")
+    parts.push("Use the AppSignal MCP to inspect performance samples and span breakdowns; find the " +
+      "bottleneck and propose optimizations. Do not change anything in AppSignal unless I ask.")
+
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
+    root.close()
+  }
+
+  // Same pattern for a SERVERS row (v0.5). memPct/swapPct can be null (the
+  // collector could not derive a percentage — see SPEC.md "v0.5"): the prompt
+  // then carries the absolute megabytes instead, and a clause with neither
+  // figure is left out rather than printing "null%".
+  function investigateHost(row) {
+    if (!row || !root.bar) return
+    var h = row.item || {}
+    var app = row.app || {}
+
+    var appPart = String(app.name || "")
+    if (app.environment) appPart += " (" + app.environment + ")"
+
+    var hostname = String(h.hostname || h.shortName || "")
+
+    var detail = []
+    if (h.cpuPct !== null && h.cpuPct !== undefined) detail.push("CPU " + root.formatPercent(Number(h.cpuPct)))
+    if (h.memPct !== null && h.memPct !== undefined) detail.push("memory " + root.formatPercent(Number(h.memPct)))
+    else if (h.memUsedMb !== null && h.memUsedMb !== undefined) detail.push("memory " + root.formatMb(h.memUsedMb) + " used")
+    if (h.load1 !== null && h.load1 !== undefined) detail.push("load " + Number(h.load1).toFixed(2))
+    if (h.diskPct !== null && h.diskPct !== undefined) {
+      var diskText = "disk " + root.formatPercent(Number(h.diskPct))
+      if (h.diskMount) diskText += " on " + h.diskMount
+      detail.push(diskText)
+    }
+    var swapText = root.hostSwapText(h)
+    if (swapText !== "") detail.push("swap " + swapText + " in use")
+
+    var head = "Analyze host " + hostname + " of app " + appPart + " in AppSignal"
+    var parts = [head + (detail.length > 0 ? ": " + detail.join(", ") : "") + "."]
+    parts.push("Use the AppSignal MCP to read host metrics over the last 24h and 7d, correlate with " +
+      "throughput, slow actions and background jobs, and propose concrete optimizations (right-sizing, " +
+      "memory, swap, disk cleanup, process counts). Do not change anything unless I ask.")
+
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
+    root.close()
+  }
+
+  // Same pattern for an ALERTS row (v0.6): an open (OPEN/WARMUP) anomaly-
+  // detection trigger. No confirmed per-trigger URL exists (see SPEC.md), so
+  // the browser fallback for this row is app.url, set on the row itself.
+  function investigateAlert(row) {
+    if (!row || !root.bar) return
+    var al = row.item || {}
+    var app = row.app || {}
+
+    var appPart = String(app.name || "")
+    if (app.environment) appPart += " (" + app.environment + ")"
+
+    var triggerName = String(al.triggerName || "")
+    var metric = String(al.metric || "")
+    var state = String(al.state || "")
+
+    var head = "Investigate the open AppSignal alert"
+    if (triggerName !== "") head += " \"" + triggerName + "\""
+    if (appPart !== "") head += " in app " + appPart
+
+    var detail = []
+    if (state !== "") detail.push("state " + state)
+    if (metric !== "") detail.push("metric " + metric)
+    if (al.lastValue !== null && al.lastValue !== undefined) detail.push("last value " + root.formatMetricValue(al.lastValue))
+    if (al.peakValue !== null && al.peakValue !== undefined) detail.push("peak value " + root.formatMetricValue(al.peakValue))
+    if (al.openedAt) detail.push("opened at " + al.openedAt)
+
+    var parts = [head + (detail.length > 0 ? ", " + detail.join(", ") : "") + "."]
+    if (al.message) parts.push("Message: " + al.message + ".")
+    parts.push("Use the AppSignal MCP to inspect the trigger and recent metric data; explain what is " +
+      "driving it and whether it needs action. Do not change the trigger or acknowledge the alert unless I ask.")
+
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
+    root.close()
+  }
+
+  // Same pattern for a JOBS row (v0.6): one background queue (ActiveJob).
+  function investigateQueue(row) {
+    if (!row || !root.bar) return
+    var q = row.item || {}
+    var app = row.app || {}
+
+    var appPart = String(app.name || "")
+    if (app.environment) appPart += " (" + app.environment + ")"
+
+    var name = String(q.name || "")
+    var detail = []
+    if (Number(q.processed || 0) > 0) detail.push(root.plural(Math.round(Number(q.processed)), "job", "jobs") + " processed in the last hour")
+    if (q.queueTimeMs !== null && q.queueTimeMs !== undefined) detail.push("typical wait " + root.formatDuration(q.queueTimeMs))
+    if (q.queueTimeHighMs !== null && q.queueTimeHighMs !== undefined) detail.push("p95 wait " + root.formatDuration(q.queueTimeHighMs))
+    if (Number(q.failed || 0) > 0) detail.push(Math.round(Number(q.failed)) + (Number(q.failed) === 1 ? " failed job" : " failed jobs"))
+    if (q.scheduled === true) detail.push("every job in the window was scheduled for later, not backed up")
+
+    var head = "Analyze background queue " + name + " of app " + appPart + " in AppSignal"
+    var parts = [head + (detail.length > 0 ? ": " + detail.join(", ") : "") + "."]
+    parts.push("Use the AppSignal MCP to inspect throughput, queue time and the slowest jobs in this queue; " +
+      "propose fixes. Do not change anything unless I ask.")
+
+    root.runAction("omarchy agent prompt " + Util.shellQuote(root.oneLine(parts.join(" "))))
     root.close()
   }
 
   function scrollToSelected() {
     if (!panelFlick || root.focusRows.length === 0) return
-    var row = root.rowItems[root.clamp(root.selectedRowIndex, 0, root.focusRows.length - 1)]
+    var last = root.focusRows.length - 1
+    var row = root.rowItemAt(root.clamp(root.selectedRowIndex, 0, last))
     if (!row) return
+    var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+    // The deploy line hangs below the last row and is not focusable, so
+    // stopping one padding short of the bottom row would leave it forever
+    // off-screen for anyone driving the panel from the keyboard. On the last
+    // row, go all the way down instead.
+    if (root.selectedRowIndex >= last) { panelFlick.contentY = maxY; return }
+    // Same on the way up: the hero and the app tabs sit above the first row,
+    // so parking on it means the top of the panel.
+    if (root.selectedRowIndex <= 0) { panelFlick.contentY = 0; return }
     var pos = row.mapToItem(panelFlick.contentItem, 0, 0)
     var pad = Style.space(8)
     if (pos.y - pad < panelFlick.contentY)
       panelFlick.contentY = Math.max(0, pos.y - pad)
     else if (pos.y + row.height + pad > panelFlick.contentY + panelFlick.height)
-      panelFlick.contentY = pos.y + row.height + pad - panelFlick.height
+      panelFlick.contentY = Math.min(maxY, pos.y + row.height + pad - panelFlick.height)
   }
 
   // ---------------------------------------------------------------- helpers
@@ -292,6 +584,19 @@ Panel {
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
   function plural(n, one, many) { return n + " " + (n === 1 ? one : many) }
+
+  // "36 min/day" for a 24h totalMs (the collector's window already is 24h, so
+  // totalMs over that window equals the daily total): seconds under a
+  // minute, minutes under an hour, hours (one decimal below 10h) above that.
+  function humanizePerDay(ms) {
+    var totalSeconds = Math.max(0, Number(ms) || 0) / 1000
+    if (totalSeconds < 60) return Math.round(totalSeconds) + " s/day"
+    var totalMinutes = totalSeconds / 60
+    if (totalMinutes < 60) return Math.round(totalMinutes) + " min/day"
+    var totalHours = totalMinutes / 60
+    var hoursText = totalHours >= 10 ? Math.round(totalHours) : totalHours.toFixed(1).replace(/\.0$/, "")
+    return hoursText + " h/day"
+  }
 
   // "updated"/"stale" reads this instead of Date.now() so the panel keeps
   // telling the truth while it sits open.
@@ -315,10 +620,17 @@ Panel {
   }
 
   function heroMeta() {
-    if (data.loading) return "REFRESHING…"
-    var ago = root.timeAgo(data.updatedAt, root.nowMs)
-    var when = ago === "" || ago === "just now" ? "JUST NOW" : ago.toUpperCase() + " AGO"
-    return (data.stale ? "STALE · FROM " : "UPDATED ") + when
+    var base
+    if (data.loading) {
+      base = "REFRESHING…"
+    } else {
+      var ago = root.timeAgo(data.updatedAt, root.nowMs)
+      var when = ago === "" || ago === "just now" ? "JUST NOW" : ago.toUpperCase() + " AGO"
+      base = (data.stale ? "STALE · FROM " : "UPDATED ") + when
+    }
+    // v0.7: visible proof dry-run is on, right next to "UPDATED …" — a
+    // tester must see this before pressing Enter/o on a row (SPEC.md).
+    return data.dryRun ? base + "  ·  DRY RUN" : base
   }
 
   function heroIdentity() {
@@ -346,9 +658,124 @@ Panel {
     return parts.join(" · ")
   }
 
+  // "1.2k" for 1200, "254" for 254 — one decimal above 1000, trimmed when
+  // it would just be ".0".
+  function formatCount(n) {
+    if (!isFinite(n)) return "0"
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k"
+    return String(Math.round(n))
+  }
+
+  // AppSignal's error_rate gauge is already expressed in percent, not as a
+  // 0-1 fraction: namespaces that fail on every transaction ("unhandled",
+  // "rake", "runner") report exactly 100.0, and a production app's 0.07 over 24h
+  // lines up with its 44 HTTP 500s out of ~78k requests (0.06%), not with 7%.
+  // So the value is printed as-is, with enough decimals that a real-world
+  // rate below 1% does not collapse into "0.0%".
+  function formatPercent(n) {
+    if (!isFinite(n) || n <= 0) return "0%"
+    if (n >= 10) return Math.round(n) + "%"
+    if (n >= 1) return n.toFixed(1).replace(/\.0$/, "") + "%"
+    return n.toFixed(2).replace(/0$/, "").replace(/\.$/, "") + "%"
+  }
+
+  // Absolute memory, in the megabytes AppSignal reports: "512 MB" below a
+  // gigabyte, "1.1 GB" above it.
+  function formatMb(n) {
+    var v = Number(n)
+    if (!isFinite(v) || v < 0) return ""
+    if (v < 1024) return Math.round(v) + " MB"
+    return (v / 1024).toFixed(1) + " GB"
+  }
+
+  // Memory for a host row. A real percentage wins when the host publishes a
+  // memory total; otherwise the absolute "used" figure is shown, which is all
+  // container hosts report (see SPEC.md "v0.5"). "n/a" only when neither exists.
+  function hostMemText(h) {
+    if (!h) return "n/a"
+    if (h.memPct !== null && h.memPct !== undefined) return Math.round(Number(h.memPct)) + "%"
+    if (h.memUsedMb !== null && h.memUsedMb !== undefined) {
+      var t = root.formatMb(h.memUsedMb)
+      if (t !== "") return t
+    }
+    return "n/a"
+  }
+
+  // Swap for a host row, and "" when the host is not swapping (or reports no
+  // swap at all) so the caller can drop the metric instead of printing a zero.
+  function hostSwapText(h) {
+    if (!h) return ""
+    if (h.swapPct !== null && h.swapPct !== undefined && Number(h.swapPct) > 0)
+      return Math.round(Number(h.swapPct)) + "%"
+    if (h.swapUsedMb !== null && h.swapUsedMb !== undefined && Number(h.swapUsedMb) > 0)
+      return root.formatMb(h.swapUsedMb)
+    return ""
+  }
+
+  // A JOBS queue-wait duration: "80 ms" below a second, up to "56 h" for a
+  // genuinely backed-up queue. Queues whose wait is long only because their
+  // jobs were scheduled for later never reach this function — the collector
+  // flags them `scheduled` and the row prints that word instead (SPEC.md
+  // "v0.6"). "n/a" when the metric had no data point for that queue.
+  function formatDuration(ms) {
+    var v = Number(ms)
+    if (!isFinite(v) || v < 0) return "n/a"
+    if (v < 1000) return Math.round(v) + " ms"
+    var seconds = v / 1000
+    if (seconds < 60) return Math.round(seconds) + " s"
+    var minutes = seconds / 60
+    if (minutes < 60) return Math.round(minutes) + " min"
+    var hours = minutes / 60
+    var hoursText = hours >= 10 ? Math.round(hours) : hours.toFixed(1).replace(/\.0$/, "")
+    return hoursText + " h"
+  }
+
+  // An ALERTS metric value (lastValue/peakValue): AppSignal does not say what
+  // unit a trigger's metric is in, so this just prints it compactly — a
+  // near-integer without decimals, anything else to two.
+  function formatMetricValue(n) {
+    var v = Number(n)
+    if (!isFinite(v)) return "n/a"
+    if (Math.abs(v - Math.round(v)) < 0.005) return String(Math.round(v))
+    return v.toFixed(2).replace(/0$/, "").replace(/\.$/, "")
+  }
+
+  // The health line under the app header: "1.2k req/h · 0.4% errors · 182 ms
+  // mean" (last hour). Any missing field is omitted, not zeroed; with no
+  // health at all (app outside the collector's metrics phase, or that phase
+  // failed for it) this returns "" and the caller hides the line entirely.
+  function healthLine(app) {
+    var h = app ? app.health : null
+    if (!h || typeof h !== "object") return ""
+    var parts = []
+    if (h.throughput !== null && h.throughput !== undefined)
+      parts.push(root.formatCount(Number(h.throughput)) + " req/h")
+    if (h.errorRate !== null && h.errorRate !== undefined)
+      parts.push(root.formatPercent(Number(h.errorRate)) + " errors")
+    if (h.meanMs !== null && h.meanMs !== undefined)
+      parts.push(Math.round(Number(h.meanMs)) + " ms mean")
+    return parts.join(" · ")
+  }
+
+  // Foot line: "deploy 8a7eda9 · memo · 21d ago · 3 errors since". AppSignal
+  // hands back a synthetic marker for apps that never really deployed
+  // (shortRevision "No deploy yet"); treat that the same as no deploy at all.
+  function deployLine(app) {
+    var d = app ? app.lastDeploy : null
+    if (!d || typeof d !== "object") return ""
+    var rev = String(d.shortRevision || "")
+    if (rev === "" || rev === "No deploy yet") return ""
+    var parts = ["deploy " + rev]
+    if (d.user && d.user !== "N/A") parts.push(String(d.user))
+    if (d.liveForInWords) parts.push(String(d.liveForInWords) + " ago")
+    var errCount = Number(d.exceptionCount || 0)
+    if (errCount > 0) parts.push(errCount + (errCount === 1 ? " error" : " errors") + " since")
+    return parts.join(" · ")
+  }
+
   function openUrl(url) {
     if (!url || !root.bar) return
-    root.bar.run("omarchy launch browser " + Util.shellQuote(url))
+    root.runAction("omarchy launch browser " + Util.shellQuote(url))
     root.close()
   }
 
@@ -400,12 +827,18 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: root.glyphHeartbeat
+    // v0.6: summarizes only what is actually wrong, across errors, open
+    // alerts, monitors down, failing check-ins and hot hosts — e.g.
+    // "3 errors · 1 alert · 1 host hot" (SPEC.md's own example wording).
     tooltipText: {
-      if (data.openErrors === 0 && data.monitorsDown === 0) return "AppSignal"
       var parts = []
-      if (data.openErrors > 0) parts.push(root.plural(data.openErrors, "error", "errors") + " open")
+      if (data.openErrors > 0) parts.push(root.plural(data.openErrors, "error", "errors"))
+      if (data.alertsOpen > 0) parts.push(root.plural(data.alertsOpen, "alert", "alerts"))
       if (data.monitorsDown > 0) parts.push(root.plural(data.monitorsDown, "monitor", "monitors") + " down")
-      return parts.join(" · ")
+      if (data.checkInsFailing > 0) parts.push(root.plural(data.checkInsFailing, "check-in", "check-ins") + " failing")
+      if (data.hostsWarn > 0) parts.push(root.plural(data.hostsWarn, "host", "hosts") + " hot")
+      if (data.queuesWarn > 0) parts.push(root.plural(data.queuesWarn, "queue", "queues") + " backed up")
+      return parts.length > 0 ? parts.join(" · ") : "AppSignal"
     }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.refreshNow()
@@ -679,8 +1112,79 @@ Panel {
             spacing: Style.space(8)
 
             readonly property var app: root.selectedApp || ({})
+            readonly property var alerts: root.asList(appSection.app.alerts)
             readonly property var errs: root.asList(appSection.app.errors)
             readonly property var mons: root.asList(appSection.app.monitors)
+            readonly property var perfIncidents: root.asList(appSection.app.perf)
+            // v0.4.1: two impact-ranked lists (web, background) instead of one
+            // mean-ranked list; only used as a fallback when there is no open
+            // performance incident.
+            readonly property var slowWeb: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowWeb)
+            readonly property var slowBackground: appSection.perfIncidents.length > 0 ? [] : root.asList(appSection.app.slowBackground)
+            readonly property int perfRowCount: appSection.perfIncidents.length > 0
+              ? appSection.perfIncidents.length
+              : (appSection.slowWeb.length + appSection.slowBackground.length)
+            readonly property var hosts: root.asList(appSection.app.hosts)
+            readonly property var queues: root.asList(appSection.app.queues)
+            readonly property var checkIns: root.asList(appSection.app.checkIns)
+
+            // v0.7: the row cursor's flat index no longer assumes a fixed
+            // section order — `sections` can reorder or drop any of them.
+            // rowCounts is keyed exactly like the `sections` setting, so
+            // flatOffset() can walk root.sectionOrder (the same list
+            // root.focusRows walks, up in Panel's own scope) and sum what
+            // comes before whichever section asks. The two must never
+            // disagree, or Enter/o would act on the wrong row.
+            readonly property var rowCounts: ({
+              alerts: appSection.alerts.length,
+              errors: appSection.errs.length,
+              performance: appSection.perfRowCount,
+              servers: appSection.hosts.length,
+              uptime: appSection.mons.length,
+              jobs: appSection.queues.length,
+              checkins: appSection.checkIns.length
+            })
+            function flatOffset(key) {
+              var order = root.sectionOrder
+              var offset = 0
+              for (var i = 0; i < order.length; i++) {
+                if (order[i] === key) return offset
+                offset += Number(appSection.rowCounts[order[i]] || 0)
+              }
+              return offset
+            }
+
+            // Whether a section has anything to show — the same conditions
+            // the old fixed-order Columns used, just addressable by key now
+            // that a Loader (not a literal child) decides what renders.
+            function sectionVisible(key) {
+              switch (key) {
+                case "alerts": return appSection.alerts.length > 0
+                case "errors": return true
+                case "performance": return appSection.perfIncidents.length > 0 ||
+                  appSection.slowWeb.length > 0 || appSection.slowBackground.length > 0
+                case "servers": return appSection.hosts.length > 0
+                case "uptime": return appSection.mons.length > 0
+                case "jobs": return appSection.queues.length > 0
+                case "checkins": return appSection.checkIns.length > 0
+                case "deploy": return root.deployLine(appSection.app) !== ""
+                default: return false
+              }
+            }
+
+            function sectionComponent(key) {
+              switch (key) {
+                case "alerts": return appSection.alertsSectionComponent
+                case "errors": return appSection.errorsSectionComponent
+                case "performance": return appSection.performanceSectionComponent
+                case "servers": return appSection.serversSectionComponent
+                case "uptime": return appSection.uptimeSectionComponent
+                case "jobs": return appSection.jobsSectionComponent
+                case "checkins": return appSection.checkinsSectionComponent
+                case "deploy": return appSection.deploySectionComponent
+                default: return null
+              }
+            }
 
             PanelSeparator { foreground: root.foreground }
 
@@ -736,65 +1240,325 @@ Panel {
               }
             }
 
-            // ---- Open errors ----
-            Column {
+            // ---- Health (last hour) ----
+            Text {
               width: parent.width
-              spacing: Style.space(6)
+              text: root.healthLine(appSection.app)
+              visible: text !== ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "OPEN ERRORS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
+            // ---- Sections ---- (v0.7)
+            //
+            // Each of the eight sections below is a named Component held as a
+            // property of appSection, so it keeps normal lexical access to
+            // appSection.* and root.* (an anonymous Component assigned to a
+            // property keeps the enclosing document's id scope; the file's
+            // other `component Name: Type {}` declarations, used for row
+            // delegates below, deliberately do not — see their own comments).
+            // The Repeater/Loader pair at the bottom instantiates whichever of
+            // these root.sectionOrder names, in that order — this is what
+            // lets the `sections` setting reorder or drop any of them without
+            // the row cursor (flatOffset() above, root.focusRows) losing sync.
+            //
+            // ALERTS (v0.6): the most urgent thing an app can be showing.
+            // Hidden when there are none — today that is every app, since
+            // this tenant has 0 triggers configured.
+            property Component alertsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
 
-              Text {
-                visible: appSection.errs.length === 0
-                width: parent.width
-                text: "No open errors"
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "ALERTS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
 
-              Repeater {
-                model: appSection.errs
+                Repeater {
+                  model: appSection.alerts
 
-                ErrorRow {
-                  required property var modelData
-                  required property int index
+                  AlertRow {
+                    required property var modelData
+                    required property int index
 
-                  width: appSection.width
-                  err: modelData
-                  flatIndex: index
+                    width: appSection.width
+                    alert: modelData
+                    flatIndex: appSection.flatOffset("alerts") + index
+                  }
                 }
               }
             }
 
-            // ---- Uptime ----
-            Column {
-              width: parent.width
-              visible: appSection.mons.length > 0
-              spacing: Style.space(6)
+            property Component errorsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
 
-              PanelSectionHeader {
-                width: parent.width
-                text: "UPTIME"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              Repeater {
-                model: appSection.mons
-
-                MonitorRow {
-                  required property var modelData
-                  required property int index
-
-                  width: appSection.width
-                  mon: modelData
-                  flatIndex: appSection.errs.length + index
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "OPEN ERRORS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
                 }
+
+                Text {
+                  visible: appSection.errs.length === 0
+                  width: parent.width
+                  text: "No open errors"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Repeater {
+                  model: appSection.errs
+
+                  ErrorRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    err: modelData
+                    flatIndex: appSection.flatOffset("errors") + index
+                  }
+                }
+              }
+            }
+
+            // Open performance incidents when there are any (AppSignal auto-
+            // closes these, so it is rare); otherwise two 24h impact-ranked
+            // lists (WEB, BACKGROUND) the collector's metrics phase computed.
+            property Component performanceSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "PERFORMANCE"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: appSection.perfIncidents
+
+                  PerfRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    perf: modelData
+                    flatIndex: appSection.flatOffset("performance") + index
+                  }
+                }
+
+                // WEB · 24H
+                Column {
+                  width: parent.width
+                  visible: appSection.perfIncidents.length === 0 && appSection.slowWeb.length > 0
+                  spacing: Style.space(6)
+
+                  Text {
+                    width: parent.width
+                    text: "WEB · 24H"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.letterSpacing: 1.2
+                  }
+
+                  Repeater {
+                    model: appSection.slowWeb
+
+                    SlowActionRow {
+                      required property var modelData
+                      required property int index
+
+                      width: appSection.width
+                      action: modelData
+                      flatIndex: appSection.flatOffset("performance") + index
+                    }
+                  }
+                }
+
+                // BACKGROUND · 24H
+                Column {
+                  width: parent.width
+                  visible: appSection.perfIncidents.length === 0 && appSection.slowBackground.length > 0
+                  spacing: Style.space(6)
+
+                  Text {
+                    width: parent.width
+                    text: "BACKGROUND · 24H"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.letterSpacing: 1.2
+                  }
+
+                  Repeater {
+                    model: appSection.slowBackground
+
+                    SlowActionRow {
+                      required property var modelData
+                      required property int index
+
+                      width: appSection.width
+                      action: modelData
+                      flatIndex: appSection.flatOffset("performance") + appSection.slowWeb.length + index
+                    }
+                  }
+                }
+              }
+            }
+
+            property Component serversSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "SERVERS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: appSection.hosts
+
+                  HostRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    host: modelData
+                    flatIndex: appSection.flatOffset("servers") + index
+                  }
+                }
+              }
+            }
+
+            property Component uptimeSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "UPTIME"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: appSection.mons
+
+                  MonitorRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    mon: modelData
+                    flatIndex: appSection.flatOffset("uptime") + index
+                  }
+                }
+              }
+            }
+
+            // JOBS (v0.6, background queues)
+            property Component jobsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "JOBS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: appSection.queues
+
+                  JobRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    queue: modelData
+                    flatIndex: appSection.flatOffset("jobs") + index
+                  }
+                }
+              }
+            }
+
+            // CHECK-INS (v0.6)
+            property Component checkinsSectionComponent: Component {
+              Column {
+                width: appSection.width
+                spacing: Style.space(6)
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "CHECK-INS"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: appSection.checkIns
+
+                  CheckInRow {
+                    required property var modelData
+                    required property int index
+
+                    width: appSection.width
+                    checkIn: modelData
+                    flatIndex: appSection.flatOffset("checkins") + index
+                  }
+                }
+              }
+            }
+
+            property Component deploySectionComponent: Component {
+              Text {
+                width: appSection.width
+                text: root.deployLine(appSection.app)
+                visible: text !== ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openUrl(appSection.app.deploysUrl)
+                }
+              }
+            }
+
+            Repeater {
+              model: root.sectionOrder
+
+              Loader {
+                id: sectionLoader
+                required property string modelData
+
+                width: appSection.width
+                visible: appSection.sectionVisible(modelData)
+                sourceComponent: appSection.sectionComponent(modelData)
               }
             }
           }
@@ -831,8 +1595,8 @@ Panel {
     implicitHeight: Math.max(Style.space(40),
       rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
 
-    Component.onCompleted: root.registerRow(errorRow.flatIndex, errorRow)
-    Component.onDestruction: root.unregisterRow(errorRow.flatIndex, errorRow)
+    Component.onCompleted: root.registerRow(errorRow)
+    Component.onDestruction: root.unregisterRow(errorRow)
 
     Column {
       id: rowBody
@@ -941,8 +1705,8 @@ Panel {
     implicitHeight: Math.max(Style.space(40),
       rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
 
-    Component.onCompleted: root.registerRow(monitorRow.flatIndex, monitorRow)
-    Component.onDestruction: root.unregisterRow(monitorRow.flatIndex, monitorRow)
+    Component.onCompleted: root.registerRow(monitorRow)
+    Component.onDestruction: root.unregisterRow(monitorRow)
 
     Column {
       id: rowBody
@@ -1019,6 +1783,734 @@ Panel {
         root.focusZone = "rows"
         root.cursorActive = true
         root.selectedRowIndex = monitorRow.flatIndex
+      }
+    }
+  }
+
+  // One open performance incident: speedometer glyph, action name, namespace
+  // + mean + count, and how long ago it last occurred. Same click pattern as
+  // ErrorRow, routed through investigatePerf() instead of investigate().
+  component PerfRow: CursorSurface {
+    id: perfRow
+
+    property var perf: null
+    property int flatIndex: -1
+
+    readonly property string title: perfRow.perf ? String(perfRow.perf.action || perfRow.perf.title || "") : ""
+    readonly property string namespace: perfRow.perf ? String(perfRow.perf.namespace || "") : ""
+    readonly property real meanMs: perfRow.perf ? Number(perfRow.perf.mean || 0) : 0
+    readonly property int count: perfRow.perf ? Number(perfRow.perf.count || 0) : 0
+    readonly property string meta: {
+      var parts = []
+      if (perfRow.namespace !== "") parts.push(perfRow.namespace)
+      if (perfRow.meanMs > 0) parts.push(Math.round(perfRow.meanMs) + " ms")
+      if (perfRow.count > 0) parts.push(perfRow.count + "×")
+      return parts.join("  ·  ")
+    }
+    readonly property string url: perfRow.perf ? String(perfRow.perf.url || "") : ""
+    readonly property string lastOccurredAt: perfRow.perf ? String(perfRow.perf.lastOccurredAt || "") : ""
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === perfRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(perfRow)
+    Component.onDestruction: root.unregisterRow(perfRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowAge.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphSpeedometer
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: perfRow.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowMeta
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: perfRow.meta
+          visible: text !== ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    Text {
+      id: rowAge
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.top: rowBody.top
+      text: root.timeAgo(perfRow.lastOccurredAt, root.nowMs)
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    MouseArea {
+      id: perfMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[perfRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = perfRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: perfMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
+    }
+  }
+
+  // One of the 24h slowest actions (shown only when the app has no open
+  // performance incident): speedometer glyph, action name, namespace, and
+  // "182 ms · 340×" on the right. Same click pattern as PerfRow.
+  component SlowActionRow: CursorSurface {
+    id: slowRow
+
+    property var action: null
+    property int flatIndex: -1
+
+    readonly property string title: slowRow.action ? String(slowRow.action.action || "") : ""
+    readonly property string namespace: slowRow.action ? String(slowRow.action.namespace || "") : ""
+    readonly property real meanMs: slowRow.action ? Number(slowRow.action.meanMs || 0) : 0
+    readonly property int count: slowRow.action ? Number(slowRow.action.count || 0) : 0
+    readonly property real totalMs: slowRow.action
+      ? Number(slowRow.action.totalMs !== undefined ? slowRow.action.totalMs : slowRow.meanMs * slowRow.count) : 0
+    readonly property string stat: Math.round(slowRow.meanMs) + " ms  ·  " + slowRow.count + "×  ·  " + root.humanizePerDay(slowRow.totalMs)
+    readonly property string url: slowRow.action ? String(slowRow.action.url || "") : ""
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === slowRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(slowRow)
+    Component.onDestruction: root.unregisterRow(slowRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowStat.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphSpeedometer
+          color: root.alpha(root.foreground, 0.60)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: slowRow.title
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowMeta
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: slowRow.namespace
+          visible: text !== "" && text !== "web"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    Text {
+      id: rowStat
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: rowBody.verticalCenter
+      text: slowRow.stat
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    MouseArea {
+      id: slowMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[slowRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = slowRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: slowMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
+    }
+  }
+
+  // One host reporting server metrics for the app (v0.5). Two lines, because
+  // the metric line ("CPU 4% · MEM 1.1 GB · LOAD 0.02 · DISK 37% · SWAP
+  // 512 MB") is far too long to share a line with the hostname at panel width:
+  // first the server glyph and the hostname (shortName in full color, the
+  // "-<container id>" tail dim), then the metrics underneath, each one colored
+  // urgent at or above its warn threshold. MEM falls back to absolute
+  // megabytes when the host publishes no memory total (every container host
+  // checked — see SPEC.md "v0.5"), and only shows "n/a" with neither figure.
+  component HostRow: CursorSurface {
+    id: hostRow
+
+    property var host: null
+    property int flatIndex: -1
+
+    readonly property string hostname: hostRow.host ? String(hostRow.host.hostname || "") : ""
+    readonly property string shortName: hostRow.host ? String(hostRow.host.shortName || hostRow.hostname) : ""
+    readonly property bool warn: hostRow.host ? hostRow.host.warn === true : false
+
+    function metricColor(overWarn) { return overWarn ? String(root.urgent) : String(root.dim) }
+    function pctText(value) { return (value === null || value === undefined) ? "n/a" : Math.round(Number(value)) + "%" }
+
+    readonly property string statText: {
+      if (!hostRow.host) return ""
+      var h = hostRow.host
+      var cpuOver = h.cpuPct !== null && h.cpuPct !== undefined && Number(h.cpuPct) >= root.cpuWarnPct
+      var memOver = h.memPct !== null && h.memPct !== undefined && Number(h.memPct) >= root.memWarnPct
+      var diskOver = h.diskPct !== null && h.diskPct !== undefined && Number(h.diskPct) >= root.diskWarnPct
+      var load1Text = (h.load1 === null || h.load1 === undefined) ? "n/a" : Number(h.load1).toFixed(2)
+      var parts = [
+        "<font color=\"" + hostRow.metricColor(cpuOver) + "\">CPU " + hostRow.pctText(h.cpuPct) + "</font>",
+        "<font color=\"" + hostRow.metricColor(memOver) + "\">MEM " + root.hostMemText(h) + "</font>",
+        "<font color=\"" + String(root.dim) + "\">LOAD " + load1Text + "</font>",
+        "<font color=\"" + hostRow.metricColor(diskOver) + "\">DISK " + hostRow.pctText(h.diskPct) + "</font>"
+      ]
+      // Swap only shows up when the host is actually swapping: a host with no
+      // swap in use would only add noise. Swapping never raises
+      // `warn` on its own, so this stays dim.
+      var swapText = root.hostSwapText(h)
+      if (swapText !== "")
+        parts.push("<font color=\"" + String(root.dim) + "\">SWAP " + swapText + "</font>")
+      return parts.join("  ·  ")
+    }
+
+    // The full hostname, with everything shortName dropped (the container id)
+    // in the dim color: the whole name stays on screen without the noisy tail
+    // competing with the readable part.
+    readonly property string titleText: {
+      var full = hostRow.hostname !== "" ? hostRow.hostname : hostRow.shortName
+      if (full === "") return ""
+      // StyledText: a hostname is plain enough in practice, but it comes from
+      // an AppSignal tag, so it is escaped before being framed in markup.
+      function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") }
+      if (hostRow.shortName === "" || full.indexOf(hostRow.shortName) !== 0 || full === hostRow.shortName)
+        return esc(full)
+      return esc(hostRow.shortName) + "<font color=\"" + String(root.dim) + "\">" +
+        esc(full.substring(hostRow.shortName.length)) + "</font>"
+    }
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === hostRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowStat.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(hostRow)
+    Component.onDestruction: root.unregisterRow(hostRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphServer
+          color: hostRow.warn ? root.urgent : root.alpha(root.foreground, 0.60)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          textFormat: Text.StyledText
+          text: hostRow.titleText
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowStat
+          width: parent.width - rowGlyph.width - parent.spacing
+          textFormat: Text.StyledText
+          text: hostRow.statText
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    MouseArea {
+      id: hostMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[hostRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = hostRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: hostMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
+    }
+  }
+
+  // One open (OPEN/WARMUP) anomaly-detection alert (v0.6): bell glyph,
+  // trigger name, "<metric> · last <v> · peak <v>", and "OPEN · 12m" /
+  // "WARMUP · 3m" on the right. Same click pattern as ErrorRow, routed
+  // through investigateAlert().
+  component AlertRow: CursorSurface {
+    id: alertRow
+
+    property var alert: null
+    property int flatIndex: -1
+
+    readonly property string triggerName: alertRow.alert ? String(alertRow.alert.triggerName || "") : ""
+    readonly property string state: alertRow.alert ? String(alertRow.alert.state || "") : ""
+    readonly property string metric: alertRow.alert ? String(alertRow.alert.metric || "") : ""
+    readonly property real lastValue: alertRow.alert ? Number(alertRow.alert.lastValue || 0) : 0
+    readonly property real peakValue: alertRow.alert ? Number(alertRow.alert.peakValue || 0) : 0
+    readonly property string meta: {
+      if (!alertRow.alert) return ""
+      var parts = []
+      if (alertRow.metric !== "") parts.push(alertRow.metric)
+      parts.push("last " + root.formatMetricValue(alertRow.lastValue))
+      parts.push("peak " + root.formatMetricValue(alertRow.peakValue))
+      return parts.join("  ·  ")
+    }
+    readonly property string openedAt: alertRow.alert ? String(alertRow.alert.openedAt || "") : ""
+    readonly property string statusText: alertRow.state +
+      (alertRow.openedAt !== "" ? "  ·  " + root.timeAgo(alertRow.openedAt, root.nowMs) : "")
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === alertRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(alertRow)
+    Component.onDestruction: root.unregisterRow(alertRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowStatus.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphBell
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: alertRow.triggerName
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowMeta
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: alertRow.meta
+          visible: text !== ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    Text {
+      id: rowStatus
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      text: alertRow.statusText
+      color: root.urgent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    MouseArea {
+      id: alertMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[alertRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = alertRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: alertMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
+    }
+  }
+
+  // One background queue (v0.6, ActiveJob): tray glyph, queue name, and
+  // "1.2k jobs/h · 340 ms wait" on the right (plus "· N failed" in urgent
+  // when the queue had any). Same click pattern as ErrorRow, routed through
+  // investigateQueue(). A single line — unlike HostRow, a queue's stat line
+  // is short enough to share the row with its name at panel width.
+  component JobRow: CursorSurface {
+    id: jobRow
+
+    property var queue: null
+    property int flatIndex: -1
+
+    readonly property string name: jobRow.queue ? String(jobRow.queue.name || "") : ""
+    readonly property bool warn: jobRow.queue ? jobRow.queue.warn === true : false
+    // v0.6: a queue whose *floor* wait is still hours holds nothing but jobs
+    // deliberately scheduled for later. Printing "56 h wait" there says
+    // "disaster" when the truth is "working as designed", so the row says
+    // "scheduled" in dim and never turns red. See SPEC.md "v0.6".
+    readonly property bool scheduled: jobRow.queue ? jobRow.queue.scheduled === true : false
+    readonly property int failed: jobRow.queue ? Math.round(Number(jobRow.queue.failed || 0)) : 0
+
+    readonly property string statText: {
+      if (!jobRow.queue) return ""
+      var q = jobRow.queue
+      var waitColor = jobRow.warn ? String(root.urgent) : String(root.dim)
+      var waitText = jobRow.scheduled
+        ? "scheduled"
+        : ((q.queueTimeMs === null || q.queueTimeMs === undefined)
+            ? "n/a wait"
+            : root.formatDuration(q.queueTimeMs) + " wait")
+      var parts = [
+        "<font color=\"" + String(root.dim) + "\">" + root.formatCount(Number(q.processed || 0))
+          + (Math.round(Number(q.processed || 0)) === 1 ? " job/h" : " jobs/h") + "</font>",
+        "<font color=\"" + waitColor + "\">" + waitText + "</font>"
+      ]
+      if (jobRow.failed > 0)
+        parts.push("<font color=\"" + String(root.urgent) + "\">" + jobRow.failed + " failed</font>")
+      return parts.join("  ·  ")
+    }
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === jobRow.flatIndex
+    implicitHeight: Style.space(40)
+
+    Component.onCompleted: root.registerRow(jobRow)
+    Component.onDestruction: root.unregisterRow(jobRow)
+
+    Row {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowStat.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(8)
+
+      Text {
+        id: rowGlyph
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.glyphTray
+        color: jobRow.warn ? root.urgent : root.alpha(root.foreground, 0.60)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+
+      Text {
+        id: rowTitle
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width - rowGlyph.width - parent.spacing
+        text: jobRow.name
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        elide: Text.ElideRight
+      }
+    }
+
+    Text {
+      id: rowStat
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.StyledText
+      text: jobRow.statText
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    MouseArea {
+      id: jobMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        root.activateItem(root.focusRows[jobRow.flatIndex], mouse.button === Qt.RightButton)
+      }
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = jobRow.flatIndex
+      }
+    }
+
+    PanelToolTip {
+      visible: jobMouse.containsMouse
+      text: root.incidentAction === "browser"
+        ? "Click / Enter opens the browser"
+        : "Click / Enter: agent  ·  right-click / o: browser"
+    }
+  }
+
+  // One check-in trigger (v0.6): timer-check glyph, identifier, kind in dim,
+  // and its state on the right — "OK · 2h ago" in accent, "MISSED · 5h ago"
+  // in urgent. Unlike every other row kind, this always opens the browser
+  // (SPEC.md v0.6: check-ins never go to the agent), so the click handler
+  // calls root.openUrl directly instead of root.activateItem.
+  component CheckInRow: CursorSurface {
+    id: checkInRow
+
+    property var checkIn: null
+    property int flatIndex: -1
+
+    readonly property string identifier: checkInRow.checkIn ? String(checkInRow.checkIn.identifier || "") : ""
+    readonly property string kind: checkInRow.checkIn ? String(checkInRow.checkIn.kind || "") : ""
+    readonly property string lastState: checkInRow.checkIn ? String(checkInRow.checkIn.lastState || "") : ""
+    readonly property bool failing: checkInRow.checkIn ? checkInRow.checkIn.failing === true : false
+    readonly property string checkInUrl: checkInRow.checkIn ? String(checkInRow.checkIn.url || "") : ""
+    readonly property string statusText: {
+      if (!checkInRow.checkIn) return ""
+      var c = checkInRow.checkIn
+      var at = checkInRow.failing ? (c.lastErrorAt || c.lastUpdateAt) : (c.lastSuccessAt || c.lastUpdateAt)
+      var ago = root.timeAgo(at || "", root.nowMs)
+      var label = checkInRow.lastState !== "" ? checkInRow.lastState : "UNKNOWN"
+      // timeAgo() already reads as a phrase for the newest bucket ("just
+      // now"), so only the bare durations ("5h", "2d") take the " ago".
+      if (ago === "") return label
+      return label + "  ·  " + (ago === "just now" ? ago : ago + " ago")
+    }
+
+    foreground: root.foreground
+    hasCursor: root.cursorActive && root.selectedRowIndex === checkInRow.flatIndex
+    implicitHeight: Math.max(Style.space(40),
+      rowTitle.implicitHeight + rowMeta.implicitHeight + Style.spacing.md * 2)
+
+    Component.onCompleted: root.registerRow(checkInRow)
+    Component.onDestruction: root.unregisterRow(checkInRow)
+
+    Column {
+      id: rowBody
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(10)
+      anchors.right: rowStatus.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          id: rowGlyph
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.glyphTimerCheck
+          color: checkInRow.failing ? root.urgent : root.alpha(root.foreground, 0.60)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: rowTitle
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: checkInRow.identifier
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Item { width: rowGlyph.width; height: 1 }
+
+        Text {
+          id: rowMeta
+          width: parent.width - rowGlyph.width - parent.spacing
+          text: checkInRow.kind
+          visible: text !== ""
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    Text {
+      id: rowStatus
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      text: checkInRow.statusText
+      color: checkInRow.failing ? root.urgent : root.accent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.openUrl(checkInRow.checkInUrl)
+      onEntered: {
+        root.focusZone = "rows"
+        root.cursorActive = true
+        root.selectedRowIndex = checkInRow.flatIndex
       }
     }
   }

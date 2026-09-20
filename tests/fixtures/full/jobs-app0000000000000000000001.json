@@ -1,0 +1,15 @@
+{
+  "rows": [
+    { "group": { "queue": "critical" },
+      "data": { "processed": 500, "failed": 3, "queueTimeMs": 80, "queueTimeHighMs": 1200 } },
+    { "group": { "queue": "mailers" },
+      "data": { "processed": 50, "failed": 0, "queueTimeMs": 4000000, "queueTimeHighMs": 4200000 } },
+    { "group": { "queue": "default" },
+      "data": { "processed": 1000, "failed": 0, "queueTimeMs": 15000, "queueTimeHighMs": 22000 } },
+    { "group": { "queue": "low_priority" },
+      "data": { "processed": 10, "failed": 0, "queueTimeMs": 45000, "queueTimeHighMs": 60000 } },
+    { "group": { "queue": "ignored_queue" },
+      "data": { "processed": 5, "failed": 0, "queueTimeMs": 1000, "queueTimeHighMs": 1500 } }
+  ],
+  "error": null
+}

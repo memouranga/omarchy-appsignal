@@ -1,0 +1,132 @@
+{
+  "data": {
+    "viewer": {
+      "name": "Dev Example",
+      "email": "dev@example.com",
+      "organizations": [
+        {
+          "id": "org0000000000000000000001",
+          "name": "Acme",
+          "slug": "acme",
+          "apps": [
+            {
+              "id": "app0000000000000000000001",
+              "name": "Acme Web",
+              "environment": "production",
+              "status": "green",
+              "viewerPinned": true,
+              "lastPushProcessedAt": "2026-09-10T12:00:00Z",
+              "exceptionIncidents": [
+                {
+                  "number": 101,
+                  "exceptionName": "ActionController::BadRequest",
+                  "exceptionMessage": "invalid params",
+                  "actionNames": ["WelcomeController#home"],
+                  "namespace": "web",
+                  "count": 4,
+                  "severity": "error",
+                  "state": "OPEN",
+                  "lastOccurredAt": "2026-09-16T20:00:00Z"
+                },
+                {
+                  "number": 102,
+                  "exceptionName": "ActiveRecord::RecordInvalid",
+                  "exceptionMessage": "Validation failed",
+                  "actionNames": ["Pay::WebhooksController#process"],
+                  "namespace": "background",
+                  "count": 346,
+                  "severity": "warning",
+                  "state": "OPEN",
+                  "lastOccurredAt": "2026-09-16T02:00:00Z"
+                }
+              ],
+              "performanceIncidents": [],
+              "uptimeMonitors": [
+                {
+                  "id": "mon0000000000000000000001",
+                  "name": "Acme Web homepage",
+                  "url": "https://acme.example.com",
+                  "regions": ["us"],
+                  "alerts": []
+                },
+                {
+                  "id": "mon0000000000000000000002",
+                  "name": "Acme Web health",
+                  "url": "https://acme.example.com/health",
+                  "regions": ["us", "eu"],
+                  "alerts": [
+                    {
+                      "id": "alt0000000000000000000001",
+                      "state": "OPEN",
+                      "openedAt": "2026-09-16T09:00:00Z",
+                      "lastValue": 0,
+                      "message": "Connection timed out"
+                    }
+                  ]
+                }
+              ],
+              "checkIns": {
+                "triggers": [
+                  {
+                    "id": "chk0000000000000000000001",
+                    "identifier": "nightly-backup",
+                    "kind": "cron",
+                    "lastState": "OK",
+                    "lastErrorAt": null,
+                    "lastSuccessAt": "2026-09-16T03:00:00Z",
+                    "lastUpdateAt": "2026-09-16T03:00:00Z"
+                  },
+                  {
+                    "id": "chk0000000000000000000002",
+                    "identifier": "hourly-sync",
+                    "kind": "heartbeat",
+                    "lastState": "MISSED",
+                    "lastErrorAt": "2026-09-16T21:00:00Z",
+                    "lastSuccessAt": "2026-09-16T19:00:00Z",
+                    "lastUpdateAt": "2026-09-16T21:00:00Z"
+                  }
+                ]
+              },
+              "alerts": [
+                {
+                  "id": "trg0000000000000000000001",
+                  "state": "OPEN",
+                  "openedAt": "2026-09-16T08:00:00Z",
+                  "lastValue": 93.2,
+                  "peakValue": 97.8,
+                  "message": "CPU above threshold",
+                  "trigger": { "name": "High CPU", "metricName": "cpu" }
+                }
+              ],
+              "deployMarkers": [
+                {
+                  "id": "dep0000000000000000000001",
+                  "createdAt": "2026-09-10T12:00:00Z",
+                  "shortRevision": "abc1234",
+                  "user": "Dev Example",
+                  "liveForInWords": "6 days",
+                  "exceptionCount": 4,
+                  "exceptionRate": 0.4
+                }
+              ]
+            },
+            {
+              "id": "app0000000000000000000002",
+              "name": "Acme API",
+              "environment": "production",
+              "status": "green",
+              "viewerPinned": false,
+              "lastPushProcessedAt": "2026-09-10T12:00:00Z",
+              "exceptionIncidents": [],
+              "performanceIncidents": [],
+              "uptimeMonitors": [],
+              "checkIns": { "triggers": [] },
+              "alerts": [],
+              "deployMarkers": []
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
